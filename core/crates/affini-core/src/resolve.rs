@@ -60,9 +60,11 @@ pub fn resolve(
 }
 
 fn make_relative(root: &Path, path: &Path) -> Option<PathBuf> {
-    // Canonicalize removes `./ ` and `../` components so path-map lookups match.
+    // Both sides must be canonicalized: on macOS /var/folders is a symlink
+    // to /private/var/folders, so strip_prefix fails without canonicalizing root.
     let canon = path.canonicalize().ok()?;
-    canon.strip_prefix(root).ok().map(|p| p.to_path_buf())
+    let canon_root = root.canonicalize().ok()?;
+    canon.strip_prefix(&canon_root).ok().map(|p| p.to_path_buf())
 }
 
 #[cfg(test)]

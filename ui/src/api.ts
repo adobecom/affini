@@ -36,22 +36,67 @@ export interface Violation {
   message: string
 }
 
+export interface TrendPoint {
+  label: string
+  saved_at_unix: number
+  file_count: number
+  edge_count: number
+  avg_fan_in: number
+  avg_fan_out: number
+  avg_coupling: number
+  violation_count: number | null
+}
+
+export interface EdgeDesc {
+  from: string
+  to: string
+  kind: string
+  specifier: string
+}
+
+export interface ModelDiff {
+  from_commit: string
+  to_commit: string
+  modules_added: Module[]
+  modules_removed: Module[]
+  edges_added: EdgeDesc[]
+  edges_removed: EdgeDesc[]
+  summary: string
+}
+
+export interface Baseline {
+  label: string
+  saved_at_unix: number
+}
+
 const BASE = '/api'
 
-export async function fetchModel(): Promise<Model> {
-  const res = await fetch(`${BASE}/model`)
-  if (!res.ok) throw new Error(`/api/model: ${res.status}`)
+async function request<T>(path: string, opts?: RequestInit): Promise<T> {
+  const res = await fetch(`${BASE}${path}`, opts)
+  if (res.status === 204) return null as T
+  if (!res.ok) {
+    const text = await res.text()
+    throw new Error(`${path}: ${res.status} — ${text}`)
+  }
   return res.json()
 }
 
-export async function fetchViolations(): Promise<Violation[]> {
-  const res = await fetch(`${BASE}/check`)
-  if (!res.ok) throw new Error(`/api/check: ${res.status}`)
-  return res.json()
-}
+export const fetchModel       = ()                  => request<Model>('/model')
+export const fetchViolations  = ()                  => request<Violation[]>('/check')
+export const fetchSnapshots   = ()                  => request<string[]>('/snapshots')
+export const fetchTrends      = ()                  => request<TrendPoint[]>('/trends')
+export const fetchBaseline    = ()                  => request<Baseline | null>('/baseline')
+export const postBaseline     = (label: string)     =>
+  request<{ ok: boolean } | { label: string }>('/baseline', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ label }),
+  })
 
-export async function fetchSnapshots(): Promise<string[]> {
-  const res = await fetch(`${BASE}/snapshots`)
-  if (!res.ok) throw new Error(`/api/snapshots: ${res.status}`)
-  return res.json()
+export const fetchDiff = (from?: string, to?: string) => {
+  const params = new URLSearchParams()
+  if (from) params.set('from', from)
+  if (to)   params.set('to', to)
+  const qs = params.toString()
+  return request<ModelDiff | null>(`/diff${qs ? `?${qs}` : ''}`)
 }

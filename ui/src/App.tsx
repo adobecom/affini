@@ -1,15 +1,17 @@
 import { useState } from 'react'
-import { GitBranch, Network, AlertTriangle, TrendingUp } from 'lucide-react'
+import { GitBranch, Network, AlertTriangle, TrendingUp, GitCompare } from 'lucide-react'
 import GraphView from './views/GraphView'
 import ScorecardView from './views/ScorecardView'
 import TrendsView from './views/TrendsView'
+import DiffView from './views/DiffView'
 
-type Tab = 'graph' | 'scorecard' | 'trends'
+type Tab = 'graph' | 'scorecard' | 'diff' | 'trends'
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: 'graph', label: 'Module Graph', icon: <Network size={15} /> },
-  { id: 'scorecard', label: 'Scorecard', icon: <AlertTriangle size={15} /> },
-  { id: 'trends', label: 'Trends', icon: <TrendingUp size={15} /> },
+  { id: 'graph',     label: 'Module Graph', icon: <Network size={14} /> },
+  { id: 'scorecard', label: 'Scorecard',    icon: <AlertTriangle size={14} /> },
+  { id: 'diff',      label: 'Diff',         icon: <GitCompare size={14} /> },
+  { id: 'trends',    label: 'Trends',       icon: <TrendingUp size={14} /> },
 ]
 
 export default function App() {
@@ -41,9 +43,10 @@ export default function App() {
         ))}
       </nav>
       <main style={{ flex: 1, overflow: 'hidden' }}>
-        {tab === 'graph' && <GraphView />}
+        {tab === 'graph'     && <GraphView />}
         {tab === 'scorecard' && <ScorecardView />}
-        {tab === 'trends' && <TrendsView />}
+        {tab === 'diff'      && <DiffView />}
+        {tab === 'trends'    && <TrendsView />}
       </main>
     </div>
   )
