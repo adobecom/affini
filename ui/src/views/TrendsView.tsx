@@ -125,10 +125,17 @@ function TrendChart({ points, baseline }: { points: TrendPoint[]; baseline: Base
           </span>
         )}
       </div>
-      <ResponsiveContainer width="100%" height={260}>
-        <LineChart data={chartData}>
+      <ResponsiveContainer width="100%" height={320}>
+        <LineChart data={chartData} margin={{ top: 5, right: 20, left: 0, bottom: 70 }}>
           <CartesianGrid strokeDasharray="3 3" stroke="#2e3250" />
-          <XAxis dataKey="label" tick={{ fill: '#8892aa', fontSize: 10 }} />
+          <XAxis
+            dataKey="label"
+            tick={{ fill: '#8892aa', fontSize: 10 }}
+            angle={-45}
+            textAnchor="end"
+            height={80}
+            interval={0}
+          />
           <YAxis tick={{ fill: '#8892aa', fontSize: 11 }} />
           <Tooltip
             contentStyle={{ background: '#1a1d27', border: '1px solid #2e3250', borderRadius: 6 }}

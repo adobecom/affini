@@ -9,14 +9,14 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "d3": "^7.9.0",
+    "lucide-react": "^0.400.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
-    "@xyflow/react": "^12.0.0",
-    "@dagrejs/dagre": "^1.1.4",
-    "recharts": "^2.12.7",
-    "lucide-react": "^0.400.0"
+    "recharts": "^2.12.7"
   },
   "devDependencies": {
+    "@types/d3": "^7.4.3",
     "@types/react": "^18.3.3",
     "@types/react-dom": "^18.3.0",
     "@vitejs/plugin-react": "^4.3.1",

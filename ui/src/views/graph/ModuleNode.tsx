@@ -1,7 +1,5 @@
 /**
- * Custom React Flow node for a source-code module.
- *
- * Visual encoding:
+ * Module card — visual encoding:
  *  - Left border tint  → architectural layer (core/cli/ui)
  *  - Background fill   → instability on a cool→warm ramp (SDP visualisation)
  *  - Node width        → lines-of-code (larger = more code)
@@ -10,7 +8,6 @@
  *  - Dim / outline     → selection / neighbourhood highlighting
  *  - Green/red tint    → added / removed since baseline
  */
-import { Handle, Position } from '@xyflow/react'
 import type { Module, ModuleMetrics } from '../../api'
 
 // ─── layer palette (matches index.css variables) ────────────────────────────
@@ -100,81 +97,70 @@ export function ModuleNode({ data }: { data: ModuleNodeData }) {
   else if (isDupe)    badges.push(<span key="dp" title="Near-duplicate code cluster" style={{ color: '#8892aa' }}>⎘</span>)
 
   return (
-    <>
-      <Handle
-        type="target"
-        position={Position.Top}
-        style={{ background: lc, width: 7, height: 7, border: 'none', top: -3 }}
-      />
-      <div
-        style={{
-          background: bg,
-          border: `1px ${borderStyle} ${borderColor}`,
-          borderLeft: `3px ${borderStyle} ${lc}`,
-          borderRadius: 7,
-          padding: '5px 9px 6px',
-          width,
-          opacity: isDimmed ? 0.15 : isOrphan ? 0.65 : 1,
-          outline: changeOutline,
-          outlineOffset: 2,
-          transition: 'opacity 0.15s',
-          boxSizing: 'border-box',
-          color: 'var(--text)',
-          userSelect: 'none',
-        }}
-      >
-        {/* filename + badges */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
-          <div
-            style={{
-              fontWeight: 700,
-              fontSize: 11,
-              flex: 1,
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              whiteSpace: 'nowrap',
-            }}
-            title={baseName}
-          >
-            {baseName}
-          </div>
-          {badges.length > 0 && (
-            <div style={{ display: 'flex', gap: 2, fontSize: 11, flexShrink: 0 }}>
-              {badges}
-            </div>
-          )}
-        </div>
-
-        {/* directory path */}
+    <div
+      style={{
+        background: bg,
+        border: `1px ${borderStyle} ${borderColor}`,
+        borderLeft: `3px ${borderStyle} ${lc}`,
+        borderRadius: 7,
+        padding: '5px 9px 6px',
+        width,
+        opacity: isDimmed ? 0.15 : isOrphan ? 0.65 : 1,
+        outline: changeOutline,
+        outlineOffset: 2,
+        transition: 'opacity 0.15s',
+        boxSizing: 'border-box',
+        color: 'var(--text)',
+        userSelect: 'none',
+        height: '100%',
+      }}
+    >
+      {/* filename + badges */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 3 }}>
         <div
           style={{
-            color: 'var(--text-muted)',
-            fontSize: 9,
-            marginTop: 1,
+            fontWeight: 700,
+            fontSize: 11,
+            flex: 1,
             overflow: 'hidden',
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={m.path}
+          title={baseName}
         >
-          {dir}
+          {baseName}
         </div>
-
-        {/* metrics row */}
-        <div style={{ display: 'flex', gap: 7, fontSize: 10, marginTop: 4, color: 'var(--text-muted)' }}>
-          <span title="Fan-in (imported by)">↙{metrics.fan_in}</span>
-          <span title="Fan-out (imports)">↗{metrics.fan_out}</span>
-          <span title="Instability: fan_out/(fan_in+fan_out)" style={{ color: iColor }}>
-            I:{(instability * 100).toFixed(0)}%
-          </span>
-          {loc > 0 && <span title="Lines of code" style={{ marginLeft: 'auto', opacity: 0.6 }}>{loc}L</span>}
-        </div>
+        {badges.length > 0 && (
+          <div style={{ display: 'flex', gap: 2, fontSize: 11, flexShrink: 0 }}>
+            {badges}
+          </div>
+        )}
       </div>
-      <Handle
-        type="source"
-        position={Position.Bottom}
-        style={{ background: lc, width: 7, height: 7, border: 'none', bottom: -3 }}
-      />
-    </>
+
+      {/* directory path */}
+      <div
+        style={{
+          color: 'var(--text-muted)',
+          fontSize: 9,
+          marginTop: 1,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+        }}
+        title={m.path}
+      >
+        {dir}
+      </div>
+
+      {/* metrics row */}
+      <div style={{ display: 'flex', gap: 7, fontSize: 10, marginTop: 4, color: 'var(--text-muted)' }}>
+        <span title="Fan-in (imported by)">↙{metrics.fan_in}</span>
+        <span title="Fan-out (imports)">↗{metrics.fan_out}</span>
+        <span title="Instability: fan_out/(fan_in+fan_out)" style={{ color: iColor }}>
+          I:{(instability * 100).toFixed(0)}%
+        </span>
+        {loc > 0 && <span title="Lines of code" style={{ marginLeft: 'auto', opacity: 0.6 }}>{loc}L</span>}
+      </div>
+    </div>
   )
 }
