@@ -1,0 +1,16 @@
+# affini.toml — architectural intent for the affini repo itself
+# This file is checked in. Edit and ratify to enforce the design.
+
+[boundaries]
+core = ["core/crates/affini-core/**"]
+cli  = ["core/crates/affini-cli/**"]
+ui   = ["ui/**"]
+
+[rules]
+forbidden = [
+  { from = "core", to = "ui", reason = "Core library must not depend on the UI layer" },
+  { from = "core", to = "cli", reason = "Core library must not depend on the CLI binary" },
+]
+
+# Layer order: lower index = lower level. Higher layers may import lower, not the reverse.
+layers = ["core", "cli", "ui"]

@@ -1,0 +1,19 @@
+[package]
+name    = "affini-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+
+tree-sitter            = "0.24"
+tree-sitter-typescript = "0.23"
+tree-sitter-javascript = "0.23"
+streaming-iterator     = "0.1"
+
+petgraph = { version = "0.6", features = ["serde-1"] }
+walkdir  = "2"
+glob     = "0.3"
+toml     = "0.8"
