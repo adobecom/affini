@@ -69,6 +69,17 @@ export interface Baseline {
   saved_at_unix: number
 }
 
+export interface DupeCluster {
+  files: string[]
+  similarity: number
+}
+
+export interface DupesReport {
+  clusters: DupeCluster[]
+  files_analyzed: number
+  threshold: number
+}
+
 const BASE = '/api'
 
 async function request<T>(path: string, opts?: RequestInit): Promise<T> {
@@ -99,4 +110,9 @@ export const fetchDiff = (from?: string, to?: string) => {
   if (to)   params.set('to', to)
   const qs = params.toString()
   return request<ModelDiff | null>(`/diff${qs ? `?${qs}` : ''}`)
+}
+
+export const fetchDupes = (threshold?: number) => {
+  const qs = threshold !== undefined ? `?threshold=${threshold}` : ''
+  return request<DupesReport>(`/dupes${qs}`)
 }

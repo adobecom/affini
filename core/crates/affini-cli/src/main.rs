@@ -1,5 +1,6 @@
 use affini_core::{
     diff::diff,
+    dupes::{find_dupes, DEFAULT_THRESHOLD},
     graph::scan,
     intent::{self, Severity},
     model::Model,
@@ -289,6 +290,7 @@ async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result
         .route("/api/trends",    get(handler_trends))
         .route("/api/diff",      get(handler_diff))
         .route("/api/baseline",  get(handler_baseline_get).post(handler_baseline_post))
+        .route("/api/dupes",     get(handler_dupes))
         .layer(cors)
         .with_state(state);
 
@@ -522,6 +524,27 @@ async fn handler_baseline_post(
                 Err(e) => err500(e),
             }
         }
+        Err(e) => err500(e),
+    }
+}
+
+// GET /api/dupes?threshold=0.6
+// Returns structural similarity clusters across all file modules.
+#[derive(Deserialize)]
+struct DupesParams {
+    threshold: Option<f32>,
+}
+
+async fn handler_dupes(
+    State(s): State<AppState>,
+    AxumQuery(params): AxumQuery<DupesParams>,
+) -> impl IntoResponse {
+    let threshold = params
+        .threshold
+        .map(|t| t.clamp(0.1, 1.0))
+        .unwrap_or(DEFAULT_THRESHOLD);
+    match scan(&s.root) {
+        Ok(model) => json_ok(find_dupes(&model, &s.root, threshold)),
         Err(e) => err500(e),
     }
 }

@@ -1,4 +1,5 @@
 pub mod diff;
+pub mod dupes;
 pub mod graph;
 pub mod intent;
 pub mod model;
