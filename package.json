@@ -1,0 +1,14 @@
+{
+  "name": "affini",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "dev": "concurrently -n server,ui -c cyan,magenta \"./core/target/release/affini serve .\" \"npm run dev --prefix ui\"",
+    "dev:mypa": "concurrently -n server,ui -c cyan,magenta \"./core/target/release/affini serve ../mypa\" \"npm run dev --prefix ui\"",
+    "build": "cd core && cargo build --release && cd ../ui && npm run build",
+    "ui": "npm run dev --prefix ui"
+  },
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
