@@ -180,12 +180,12 @@ function CurrentStats({ point, baseline }: { point: TrendPoint; baseline: Baseli
           </span>
         )}
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(110px, 1fr))', gap: 16 }}>
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 16 }}>
         <Metric label="Files"        value={point.file_count} />
         <Metric label="Import edges" value={point.edge_count} />
-        <Metric label="Avg fan-in"   value={point.avg_fan_in} />
-        <Metric label="Avg fan-out"  value={point.avg_fan_out} />
-        <Metric label="Avg coupling" value={`${point.avg_coupling}%`} />
+        <Metric label="Avg fan-in"   value={point.avg_fan_in.toFixed(2)} />
+        <Metric label="Avg fan-out"  value={point.avg_fan_out.toFixed(2)} />
+        <Metric label="Avg coupling" value={`${point.avg_coupling.toFixed(2)}%`} />
         {point.violation_count !== null && (
           <Metric
             label="Violations"
