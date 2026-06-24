@@ -1,5 +1,5 @@
 /// Parse `affini.toml` and evaluate conformance rules against a Model.
-use crate::model::Model;
+use crate::model::{Model, NodeId};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -167,6 +167,30 @@ pub fn check(model: &Model, intent: &IntentFile) -> Vec<Violation> {
     }
 
     violations
+}
+
+/// Return a mapping from NodeId to layer name for every module that matches a
+/// declared layer.  Modules not covered by any layer are omitted.
+pub fn assign_layers(model: &Model, intent: &IntentFile) -> HashMap<NodeId, String> {
+    let layers = &intent.rules.layers;
+    if layers.is_empty() {
+        return HashMap::new();
+    }
+
+    let boundary_files = expand_boundaries(model, &intent.boundaries);
+    let mut result: HashMap<NodeId, String> = HashMap::new();
+
+    for m in &model.modules {
+        for layer_name in layers {
+            let set = resolve_boundary_or_glob(&boundary_files, layer_name);
+            if set.contains(m.path.as_str()) {
+                result.insert(m.id, layer_name.clone());
+                break;
+            }
+        }
+    }
+
+    result
 }
 
 // ---------------------------------------------------------------------------

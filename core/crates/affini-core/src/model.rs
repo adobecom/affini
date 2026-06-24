@@ -41,8 +41,14 @@ pub struct Model {
     pub commit: String,
     pub modules: Vec<Module>,
     pub edges: Vec<Edge>,
-    /// Metrics computed from the graph (fan-in, fan-out, coupling).
+    /// Metrics computed from the graph (fan-in, fan-out, coupling, etc.).
     pub metrics: HashMap<NodeId, ModuleMetrics>,
+    /// NodeId → layer name, populated from affini.toml boundaries when available.
+    #[serde(default)]
+    pub layers: HashMap<NodeId, String>,
+    /// Ordered layer names (index 0 = lowest/most-stable).  Empty if no affini.toml.
+    #[serde(default)]
+    pub layer_order: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -53,6 +59,18 @@ pub struct ModuleMetrics {
     pub fan_out: u32,
     /// fan_out / total_modules — 0–1 coupling ratio.
     pub coupling: f32,
+    /// Lines of code in this file.
+    #[serde(default)]
+    pub loc: u32,
+    /// Tarjan SCC identifier — nodes sharing the same id form a cycle when scc_size > 1.
+    #[serde(default)]
+    pub scc_id: u32,
+    /// Size of this node's strongly-connected component.  >1 means the node is in a cycle.
+    #[serde(default)]
+    pub scc_size: u32,
+    /// Instability (Martin's metric): fan_out / (fan_in + fan_out).  0 = stable, 1 = unstable.
+    #[serde(default)]
+    pub instability: f32,
 }
 
 impl Model {

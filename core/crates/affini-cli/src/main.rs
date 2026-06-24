@@ -309,7 +309,14 @@ async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result
 
 async fn handler_model(State(s): State<AppState>) -> impl IntoResponse {
     match scan(&s.root) {
-        Ok(m) => json_ok(m),
+        Ok(mut m) => {
+            // Enrich with layer assignments from affini.toml (optional — skip if absent).
+            if let Some(intent) = load_intent_opt(&s) {
+                m.layers = intent::assign_layers(&m, &intent);
+                m.layer_order = intent.rules.layers.clone();
+            }
+            json_ok(m)
+        }
         Err(e) => err500(e),
     }
 }

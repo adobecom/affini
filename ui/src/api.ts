@@ -18,6 +18,14 @@ export interface ModuleMetrics {
   fan_in: number
   fan_out: number
   coupling: number
+  /** Lines of code in this file (0 if not yet computed). */
+  loc?: number
+  /** Tarjan SCC id — nodes sharing this id with scc_size > 1 are in a cycle. */
+  scc_id?: number
+  /** SCC size — >1 means this node participates in a dependency cycle. */
+  scc_size?: number
+  /** Martin's instability: fan_out / (fan_in + fan_out).  0 = stable, 1 = unstable. */
+  instability?: number
 }
 
 export interface Model {
@@ -26,6 +34,10 @@ export interface Model {
   modules: Module[]
   edges: Edge[]
   metrics: Record<number, ModuleMetrics>
+  /** NodeId → layer name, from affini.toml boundaries (empty if no affini.toml). */
+  layers?: Record<number, string>
+  /** Ordered layer names, index 0 = lowest/most-stable (e.g. ["core","cli","ui"]). */
+  layer_order?: string[]
 }
 
 export interface Violation {
