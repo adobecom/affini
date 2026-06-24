@@ -247,14 +247,17 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
     onNodeClick(nodeId)
   }, [onNodeClick])
 
-  // ── layer band data ───────────────────────────────────────────────────────
+  // ── layer band data (only for layers that have at least one node) ─────────
   const H = containerRef.current?.clientHeight ?? 650
-  const layerBands = layerOrder.map((name, idx) => {
-    const yC    = layerTargetY(name, layerOrder, H)
-    const bandH = layerOrder.length > 0 ? (H - 180) / layerOrder.length : H
-    const color = LAYER_COLOR[name] ?? '#8892aa'
-    return { name, yTop: yC - bandH / 2, height: bandH, color, idx }
-  })
+  const populatedLayers = new Set(graphNodesRef.current.map(n => n.layer).filter(Boolean))
+  const layerBands = layerOrder
+    .filter(name => populatedLayers.has(name))
+    .map((name, idx) => {
+      const yC    = layerTargetY(name, layerOrder, H)
+      const bandH = layerOrder.length > 0 ? (H - 180) / layerOrder.length : H
+      const color = LAYER_COLOR[name] ?? '#8892aa'
+      return { name, yTop: yC - bandH / 2, height: bandH, color, idx }
+    })
 
   const graphNodes = graphNodesRef.current
   const graphEdges = graphEdgesRef.current
