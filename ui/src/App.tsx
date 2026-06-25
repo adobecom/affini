@@ -1,19 +1,21 @@
 import { useState } from 'react'
-import { GitBranch, Network, AlertTriangle, TrendingUp, GitCompare, Copy } from 'lucide-react'
+import { GitBranch, Network, AlertTriangle, TrendingUp, GitCompare, Copy, Workflow } from 'lucide-react'
 import GraphView from './views/GraphView'
 import ScorecardView from './views/ScorecardView'
 import TrendsView from './views/TrendsView'
 import DiffView from './views/DiffView'
 import DupesView from './views/DupesView'
+import FlowsView from './views/FlowsView'
 
-type Tab = 'graph' | 'scorecard' | 'diff' | 'trends' | 'dupes'
+type Tab = 'graph' | 'scorecard' | 'diff' | 'trends' | 'dupes' | 'flows'
 
 const TABS: { id: Tab; label: string; icon: React.ReactNode }[] = [
-  { id: 'graph',     label: 'Module Graph', icon: <Network size={14} /> },
-  { id: 'scorecard', label: 'Scorecard',    icon: <AlertTriangle size={14} /> },
-  { id: 'diff',      label: 'Diff',         icon: <GitCompare size={14} /> },
-  { id: 'trends',    label: 'Trends',       icon: <TrendingUp size={14} /> },
-  { id: 'dupes',     label: 'Dupes',        icon: <Copy size={14} /> },
+  { id: 'graph',     label: 'Module Graph',   icon: <Network size={14} /> },
+  { id: 'scorecard', label: 'Scorecard',      icon: <AlertTriangle size={14} /> },
+  { id: 'diff',      label: 'Diff',           icon: <GitCompare size={14} /> },
+  { id: 'trends',    label: 'Trends',         icon: <TrendingUp size={14} /> },
+  { id: 'dupes',     label: 'Dupes',          icon: <Copy size={14} /> },
+  { id: 'flows',     label: 'Feature Flows',  icon: <Workflow size={14} /> },
 ]
 
 export default function App() {
@@ -50,6 +52,7 @@ export default function App() {
         {tab === 'diff'      && <DiffView />}
         {tab === 'trends'    && <TrendsView />}
         {tab === 'dupes'     && <DupesView />}
+        {tab === 'flows'     && <FlowsView />}
       </main>
     </div>
   )

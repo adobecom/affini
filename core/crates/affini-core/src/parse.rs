@@ -32,6 +32,145 @@ fn language_for(path: &str) -> Option<tree_sitter::Language> {
     }
 }
 
+/// A named binding from an import statement.
+/// Used by the call-graph resolver to map local names to source modules.
+#[derive(Debug, Clone)]
+pub struct ImportBinding {
+    /// The local identifier used in this file.
+    pub local_name: String,
+    /// The original export name; "default" for default imports; "*" for namespace imports.
+    pub imported_name: String,
+    /// The raw module specifier (same as in ImportEdge).
+    pub specifier: String,
+}
+
+/// Parse all import bindings (named + default + namespace) from a source file.
+pub fn extract_import_bindings(path: &str, source: &str) -> Result<Vec<ImportBinding>> {
+    let language = match language_for(path) {
+        Some(l) => l,
+        None => return Ok(vec![]),
+    };
+
+    let mut parser = Parser::new();
+    parser.set_language(&language)?;
+
+    let tree = match parser.parse(source, None) {
+        Some(t) => t,
+        None => return Ok(vec![]),
+    };
+
+    let bytes = source.as_bytes();
+    let root = tree.root_node();
+    let mut bindings = Vec::new();
+
+    // Walk top-level import_statement nodes.
+    for i in 0..root.named_child_count() {
+        let stmt = match root.named_child(i) {
+            Some(n) => n,
+            None => continue,
+        };
+        if stmt.kind() != "import_statement" {
+            continue;
+        }
+
+        // Get the specifier string from the `source` field.
+        let specifier = match stmt.child_by_field_name("source") {
+            Some(src_node) => src_node
+                .utf8_text(bytes)
+                .unwrap_or("")
+                .trim()
+                .trim_matches(|c| c == '"' || c == '\'' || c == '`')
+                .to_string(),
+            None => continue,
+        };
+
+        if specifier.is_empty() {
+            continue;
+        }
+
+        // Walk the import_clause to collect bindings.
+        let clause = match stmt.child_by_field_name("import_clause") {
+            Some(c) => c,
+            None => continue,
+        };
+
+        walk_import_clause(clause, bytes, &specifier, &mut bindings);
+    }
+
+    Ok(bindings)
+}
+
+fn walk_import_clause(clause: tree_sitter::Node, bytes: &[u8], specifier: &str, out: &mut Vec<ImportBinding>) {
+    for i in 0..clause.named_child_count() {
+        let child = match clause.named_child(i) {
+            Some(n) => n,
+            None => continue,
+        };
+
+        match child.kind() {
+            "identifier" => {
+                // Default import: `import Foo from '...'`
+                let local = child.utf8_text(bytes).unwrap_or("").to_string();
+                if !local.is_empty() {
+                    out.push(ImportBinding {
+                        local_name: local,
+                        imported_name: "default".to_string(),
+                        specifier: specifier.to_string(),
+                    });
+                }
+            }
+            "namespace_import" => {
+                // Namespace import: `import * as ns from '...'`
+                // The identifier is the last named child.
+                for j in 0..child.named_child_count() {
+                    if let Some(id) = child.named_child(j) {
+                        if id.kind() == "identifier" {
+                            let local = id.utf8_text(bytes).unwrap_or("").to_string();
+                            if !local.is_empty() {
+                                out.push(ImportBinding {
+                                    local_name: local,
+                                    imported_name: "*".to_string(),
+                                    specifier: specifier.to_string(),
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+            "named_imports" => {
+                // Named imports: `import { A, B as C } from '...'`
+                for j in 0..child.named_child_count() {
+                    let spec = match child.named_child(j) {
+                        Some(n) if n.kind() == "import_specifier" => n,
+                        _ => continue,
+                    };
+
+                    let name_node = spec.child_by_field_name("name");
+                    let alias_node = spec.child_by_field_name("alias");
+
+                    let imported = name_node
+                        .and_then(|n| n.utf8_text(bytes).ok())
+                        .unwrap_or("")
+                        .to_string();
+                    let local = alias_node
+                        .and_then(|n| n.utf8_text(bytes).ok())
+                        .map(|s| s.to_string())
+                        .unwrap_or_else(|| imported.clone());
+
+                    if !local.is_empty() {
+                        out.push(ImportBinding {
+                            local_name: local,
+                            imported_name: imported,
+                            specifier: specifier.to_string(),
+                        });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// One discovered import edge from a source file.
 #[derive(Debug, Clone)]
 pub struct ImportEdge {

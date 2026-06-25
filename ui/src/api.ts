@@ -128,3 +128,83 @@ export const fetchDupes = (threshold?: number) => {
   const qs = threshold !== undefined ? `?threshold=${threshold}` : ''
   return request<DupesReport>(`/dupes${qs}`)
 }
+
+// ── Feature Flows types ────────────────────────────────────────────────────
+
+export type TypeShape =
+  | { kind: 'primitive'; name: string }
+  | { kind: 'literal'; value: string }
+  | { kind: 'object'; fields: TypeField[] }
+  | { kind: 'array'; of: TypeShape }
+  | { kind: 'union'; of: TypeShape[] }
+  | { kind: 'tuple'; of: TypeShape[] }
+  | { kind: 'ref'; name: string; args: TypeShape[]; external: boolean }
+  | { kind: 'unknown'; raw: string }
+
+export interface TypeField {
+  name: string
+  optional: boolean
+  shape: TypeShape
+}
+
+export interface ParamShape {
+  name: string
+  optional: boolean
+  shape: TypeShape
+}
+
+export interface FunctionId {
+  module: number
+  name: string
+  order: number
+}
+
+export type FragilitySource = 'Metric' | 'Type' | 'Churn'
+
+export interface FragilityFlag {
+  source: FragilitySource
+  code: string
+  message: string
+  severity: 'Error' | 'Warning'
+}
+
+export interface FlowStep {
+  from: FunctionId
+  to: FunctionId
+  call_site_order: number
+  callee_text: string
+  params: ParamShape[]
+  return_shape: TypeShape
+  arg_texts: string[]
+  fragility: FragilityFlag[]
+  depth: number
+  recursion: boolean
+  branchy: boolean
+}
+
+export interface FragilitySummary {
+  total_steps: number
+  fragile_steps: number
+  metric_flags: number
+  type_flags: number
+  churn_flags: number
+  max_severity: 'Error' | 'Warning' | null
+}
+
+export interface FlowSummary {
+  id: string
+  name: string
+  entry_module_path: string
+  kind: string
+  step_count: number
+  fragility_summary: FragilitySummary
+}
+
+export interface Flow extends FlowSummary {
+  entry: FunctionId
+  steps: FlowStep[]
+  truncated: boolean
+}
+
+export const fetchFlows = () => request<FlowSummary[]>('/flows')
+export const fetchFlow  = (id: string) => request<Flow>(`/flows/${encodeURIComponent(id)}`)

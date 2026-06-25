@@ -1,6 +1,6 @@
 /**
  * Module card — visual encoding:
- *  - Left border tint  → architectural layer (core/cli/ui)
+ *  - Left border tint  → architectural layer (color pre-computed by layers.ts)
  *  - Background fill   → instability on a cool→warm ramp (SDP visualisation)
  *  - Node width        → lines-of-code (larger = more code)
  *  - Red dashed border → participates in a dependency cycle (scc_size > 1)
@@ -9,19 +9,6 @@
  *  - Green/red tint    → added / removed since baseline
  */
 import type { Module, ModuleMetrics } from '../../api'
-
-// ─── layer palette (matches index.css variables) ────────────────────────────
-
-export const LAYER_COLORS: Record<string, string> = {
-  core: '#6366f1',  // --accent
-  cli:  '#fbbf24',  // --warning
-  ui:   '#34d399',  // --ok
-}
-
-export function layerColor(layer?: string): string {
-  if (!layer) return '#2e3250'  // --border
-  return LAYER_COLORS[layer] ?? '#8892aa'  // --text-muted fallback
-}
 
 // ─── instability fill colour (cool stable → warm unstable) ──────────────────
 
@@ -56,15 +43,17 @@ export interface ModuleNodeData {
   isDimmed: boolean
   width: number
   height: number
+  /** Pre-computed layer color from layers.ts (hex string). */
+  layerColor: string
 }
 
 // ─── component ──────────────────────────────────────────────────────────────
 
 export function ModuleNode({ data }: { data: ModuleNodeData }) {
   const { module: m, metrics, signals, isSelected, isDimmed, width } = data
-  const { instability, isHub, isOrphan, isCycle, isViolationSrc, isDupe, changeStatus, loc, layer } = signals
+  const { instability, isHub, isOrphan, isCycle, isViolationSrc, isDupe, changeStatus, loc } = signals
 
-  const lc = layerColor(layer)
+  const lc = data.layerColor
 
   const bg =
     changeStatus === 'added'   ? 'rgba(52,211,153,0.12)' :

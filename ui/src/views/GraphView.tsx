@@ -25,7 +25,8 @@ import {
   type DupesReport, type ModelDiff, type Model,
 } from '../api'
 import { ForceGraph, type FGNode, type FGEdge } from './graph/ForceGraph'
-import { layerColor, LAYER_COLORS, type ModuleSignals } from './graph/ModuleNode'
+import { buildLayerColors, layerColor } from './graph/layers'
+import { type ModuleSignals } from './graph/ModuleNode'
 
 // ─── derived signal computation ──────────────────────────────────────────────
 
@@ -144,6 +145,9 @@ export default function GraphView() {
   )
 
   const layerOrder = model?.layer_order ?? []
+
+  // Color map keyed by layer name, derived from declared order (not hardcoded names).
+  const layerColors = useMemo(() => buildLayerColors(layerOrder), [layerOrder])
 
   // ── selection neighbourhood ───────────────────────────────────────────────
   const neighborhood = useMemo<Set<number> | null>(() => {
@@ -374,8 +378,8 @@ export default function GraphView() {
         {legendOpen && (
           <div style={{ padding: '0 12px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
             <LegendSection title="Layers (left border)">
-              {Object.entries(LAYER_COLORS).map(([name, color]) => (
-                <LegendRow key={name} swatch={color} label={name} />
+              {layerOrder.map(name => (
+                <LegendRow key={name} swatch={layerColors[name] ?? '#8892aa'} label={name} />
               ))}
             </LegendSection>
             <LegendSection title="Fill colour (instability)">
@@ -407,6 +411,7 @@ export default function GraphView() {
           violations={selectedViolations}
           deps={deps}
           depOf={depOf}
+          layerColors={layerColors}
           onSelect={id => setSelectedId(id)}
           onFocus={() => { setFocusId(selectedId); setSelectedId(null) }}
           onClose={() => setSelectedId(null)}
@@ -440,7 +445,7 @@ function FilterPill({
 // ─── detail panel ─────────────────────────────────────────────────────────────
 
 function DetailPanel({
-  module: m, metrics, signals, violations, deps, depOf, onSelect, onFocus, onClose,
+  module: m, metrics, signals, violations, deps, depOf, layerColors, onSelect, onFocus, onClose,
 }: {
   module: Module
   metrics: ModuleMetrics
@@ -448,12 +453,13 @@ function DetailPanel({
   violations: Violation[]
   deps: Module[]
   depOf: Module[]
+  layerColors: Record<string, string>
   onSelect: (id: number) => void
   onFocus: () => void
   onClose: () => void
 }) {
   const baseName = m.path.split('/').pop() ?? m.path
-  const lc = layerColor(signals.layer)
+  const lc = layerColor(signals.layer, layerColors)
   const sdpLabel =
     signals.instability < 0.25 ? 'stable — depended upon by many'
     : signals.instability > 0.75 ? 'unstable — depends on many others'

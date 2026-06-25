@@ -1,15 +1,14 @@
-import { useCallback, useEffect, useReducer, useRef } from 'react'
+import { useCallback, useEffect, useMemo, useReducer, useRef } from 'react'
 import {
   forceSimulation, forceLink, forceManyBody, forceCollide, forceY, forceX,
   zoom as d3zoom, zoomIdentity, select,
   type SimulationNodeDatum, type SimulationLinkDatum, type ZoomTransform,
 } from 'd3'
 import { ModuleNode } from './ModuleNode'
+import { buildLayerColors, layerColor } from './layers'
+import { edgePath, NODE_H } from './edgePath'
 import type { ModuleMetrics } from '../../api'
 import type { ModuleSignals } from './ModuleNode'
-
-export const NODE_H = 62
-const ARROW = 8
 
 // ─── simulation types ─────────────────────────────────────────────────────────
 
@@ -65,12 +64,6 @@ export interface ForceGraphProps {
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
 
-const LAYER_COLOR: Record<string, string> = {
-  core: '#6366f1',
-  cli:  '#fbbf24',
-  ui:   '#34d399',
-}
-
 function layerTargetY(layer: string | undefined, order: string[], H: number): number {
   if (!order.length || !layer) return H / 2
   const idx = order.indexOf(layer)
@@ -79,27 +72,6 @@ function layerTargetY(layer: string | undefined, order: string[], H: number): nu
   const margin = 90
   const bandH = (H - margin * 2) / order.length
   return H - margin - (idx + 0.5) * bandH
-}
-
-function edgePath(sx: number, sy: number, tx: number, ty: number, tw: number): string {
-  const dx = tx - sx, dy = ty - sy
-  const len = Math.sqrt(dx * dx + dy * dy) || 1
-  const ux = dx / len, uy = dy / len
-  // Correct rectangle-border intersection: find the shortest distance from
-  // the target center (travelling backward) to reach the node boundary.
-  const hw = tw / 2 + ARROW + 3       // horizontal half-extent + arrowhead margin
-  const hh = NODE_H / 2 + ARROW + 3   // vertical half-extent + arrowhead margin
-  const tBorder = Math.min(
-    Math.abs(ux) > 1e-9 ? hw / Math.abs(ux) : Infinity,
-    Math.abs(uy) > 1e-9 ? hh / Math.abs(uy) : Infinity,
-  )
-  const ex = tx - ux * tBorder
-  const ey = ty - uy * tBorder
-  // Slight perpendicular bend for visual clarity on overlapping edges
-  const bend = Math.min(len * 0.08, 22)
-  const cx = (sx + ex) / 2 - uy * bend
-  const cy = (sy + ey) / 2 + ux * bend
-  return `M${sx.toFixed(1)},${sy.toFixed(1)} Q${cx.toFixed(1)},${cy.toFixed(1)} ${ex.toFixed(1)},${ey.toFixed(1)}`
 }
 
 const EDGE_COLORS = ['#4338ca', '#fbbf24', '#f87171', '#ef4444'] as const
@@ -120,6 +92,15 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
   const zoomRef      = useRef<ZoomTransform>(zoomIdentity)
   const rafRef       = useRef<number | null>(null)
   const [, forceUpdate] = useReducer(x => x + 1, 0)
+
+  // Layer colors derived from declared order (index-based, not name-based).
+  const layerColors = useMemo(() => buildLayerColors(layerOrder), [layerOrder])
+
+  // Only layers that have at least one visible node — bands tile these, not the full declared set.
+  const populatedOrder = useMemo(
+    () => layerOrder.filter(name => nodes.some(n => n.layer === name)),
+    [nodes, layerOrder],
+  )
 
   // ── zoom setup (runs once) ────────────────────────────────────────────────
   useEffect(() => {
@@ -154,7 +135,7 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
       return {
         ...n,
         x: prev?.x ?? W / 2 + (Math.random() - 0.5) * 160,
-        y: prev?.y ?? layerTargetY(n.layer, layerOrder, H) + (Math.random() - 0.5) * 50,
+        y: prev?.y ?? layerTargetY(n.layer, populatedOrder, H) + (Math.random() - 0.5) * 50,
       }
     })
 
@@ -186,7 +167,7 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
         forceCollide<SimNode>(n => n.width / 2 + 18).strength(0.85),
       )
       .force('y',
-        forceY<SimNode>(n => layerTargetY(n.layer, layerOrder, H)).strength(0.32),
+        forceY<SimNode>(n => layerTargetY(n.layer, populatedOrder, H)).strength(0.32),
       )
       .force('x', forceX<SimNode>(W / 2).strength(0.025))
       .alphaDecay(0.018)
@@ -254,17 +235,17 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
     onNodeClick(nodeId)
   }, [onNodeClick])
 
-  // ── layer band data (only for layers that have at least one node) ─────────
+  // ── layer band data ───────────────────────────────────────────────────────
+  // Uses populatedOrder (populated layers only) so bands tile the visible
+  // canvas without gaps when some declared layers have no matching modules.
   const H = containerRef.current?.clientHeight ?? 650
-  const populatedLayers = new Set(graphNodesRef.current.map(n => n.layer).filter(Boolean))
-  const layerBands = layerOrder
-    .filter(name => populatedLayers.has(name))
-    .map((name, idx) => {
-      const yC    = layerTargetY(name, layerOrder, H)
-      const bandH = layerOrder.length > 0 ? (H - 180) / layerOrder.length : H
-      const color = LAYER_COLOR[name] ?? '#8892aa'
-      return { name, yTop: yC - bandH / 2, height: bandH, color, idx }
-    })
+  const margin = 90
+  const layerBands = populatedOrder.map(name => {
+    const yC    = layerTargetY(name, populatedOrder, H)
+    const bandH = populatedOrder.length > 0 ? (H - margin * 2) / populatedOrder.length : H
+    const color = layerColors[name] ?? '#8892aa'
+    return { name, yTop: yC - bandH / 2, height: bandH, color }
+  })
 
   const graphNodes = graphNodesRef.current
   const graphEdges = graphEdgesRef.current
@@ -365,6 +346,7 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
                   isDimmed: n.isDimmed,
                   width: n.width,
                   height: NODE_H,
+                  layerColor: layerColor(n.layer, layerColors),
                 }}
               />
             </foreignObject>

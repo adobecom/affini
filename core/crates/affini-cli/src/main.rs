@@ -1,6 +1,7 @@
 use affini_core::{
     diff::diff,
     dupes::{find_dupes, DEFAULT_THRESHOLD},
+    flows::compute_flows_full,
     graph::scan,
     intent::{self, Severity},
     model::Model,
@@ -8,7 +9,7 @@ use affini_core::{
 };
 use anyhow::{bail, Context, Result};
 use axum::{
-    extract::{Query as AxumQuery, State},
+    extract::{Path as AxumPath, Query as AxumQuery, State},
     http::StatusCode,
     response::{IntoResponse, Json},
     routing::get,
@@ -78,6 +79,15 @@ enum Cmd {
         #[arg(long)]
         intent: Option<PathBuf>,
     },
+    /// Derive feature flows and print the report as JSON.
+    Flows {
+        #[arg(default_value = ".")]
+        path: PathBuf,
+        #[arg(long)]
+        intent: Option<PathBuf>,
+        #[arg(long, short)]
+        output: Option<PathBuf>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -102,6 +112,7 @@ async fn run() -> Result<()> {
         Cmd::Check { path, intent } => cmd_check(&path, intent.as_deref()).await,
         Cmd::IntentInit { path, output } => cmd_intent_init(&path, &output).await,
         Cmd::Serve { path, port, intent } => cmd_serve(&path, port, intent.as_deref()).await,
+        Cmd::Flows { path, intent, output } => cmd_flows(&path, intent.as_deref(), output.as_deref()).await,
     }
 }
 
@@ -284,13 +295,15 @@ async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result
         .allow_headers(Any);
 
     let app = Router::new()
-        .route("/api/model",     get(handler_model))
-        .route("/api/check",     get(handler_check))
-        .route("/api/snapshots", get(handler_snapshots))
-        .route("/api/trends",    get(handler_trends))
-        .route("/api/diff",      get(handler_diff))
-        .route("/api/baseline",  get(handler_baseline_get).post(handler_baseline_post))
-        .route("/api/dupes",     get(handler_dupes))
+        .route("/api/model",        get(handler_model))
+        .route("/api/check",        get(handler_check))
+        .route("/api/snapshots",    get(handler_snapshots))
+        .route("/api/trends",       get(handler_trends))
+        .route("/api/diff",         get(handler_diff))
+        .route("/api/baseline",     get(handler_baseline_get).post(handler_baseline_post))
+        .route("/api/dupes",        get(handler_dupes))
+        .route("/api/flows",        get(handler_flows))
+        .route("/api/flows/:id",    get(handler_flow_by_id))
         .layer(cors)
         .with_state(state);
 
@@ -554,6 +567,120 @@ async fn handler_dupes(
         Ok(model) => json_ok(find_dupes(&model, &s.root, threshold)),
         Err(e) => err500(e),
     }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/flows  — returns Vec<FlowSummary>
+// GET /api/flows/:id — returns full Flow
+// ---------------------------------------------------------------------------
+
+async fn handler_flows(State(s): State<AppState>) -> impl IntoResponse {
+    use std::collections::HashSet;
+    let model = match scan(&s.root) {
+        Ok(m) => m,
+        Err(e) => return err500(e),
+    };
+    let violations = match load_intent_opt(&s) {
+        Some(intent) => intent::check(&model, &intent),
+        None => vec![],
+    };
+    let changed_paths = resolve_changed_paths(&s, &model);
+    let report = compute_flows_full(&model, &s.root, &violations, &changed_paths);
+    json_ok(report.summaries.flows)
+}
+
+async fn handler_flow_by_id(
+    State(s): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    use std::collections::HashSet;
+    let model = match scan(&s.root) {
+        Ok(m) => m,
+        Err(e) => return err500(e),
+    };
+    let violations = match load_intent_opt(&s) {
+        Some(intent) => intent::check(&model, &intent),
+        None => vec![],
+    };
+    let changed_paths = resolve_changed_paths(&s, &model);
+    let report = compute_flows_full(&model, &s.root, &violations, &changed_paths);
+    match report.flows.into_iter().find(|f| f.id == id) {
+        Some(flow) => json_ok(flow),
+        None => (StatusCode::NOT_FOUND, format!("flow '{}' not found", id)).into_response(),
+    }
+}
+
+fn resolve_changed_paths(s: &AppState, model: &Model) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    if let Ok(store) = SnapshotStore::open(&s.root) {
+        if let Ok(Some(baseline)) = store.load_baseline() {
+            if let Ok(Some(baseline_model)) = store.load(&baseline.label) {
+                let d = diff(&baseline_model, model);
+                for m in &d.modules_added { set.insert(m.path.clone()); }
+                for m in &d.modules_removed { set.insert(m.path.clone()); }
+            }
+        }
+    }
+    set
+}
+
+// ---------------------------------------------------------------------------
+// flows CLI
+// ---------------------------------------------------------------------------
+
+async fn cmd_flows(path: &Path, intent_path: Option<&Path>, output: Option<&Path>) -> Result<()> {
+    use std::collections::HashSet;
+    eprintln!("deriving flows for {}…", path.display());
+
+    let model = scan(path).context("scan failed")?;
+
+    let violations = if let Some(ip) = intent_path {
+        let intent = intent::load(ip).context("loading intent")?;
+        intent::check(&model, &intent)
+    } else {
+        let default_path = path.join("affini.toml");
+        if default_path.exists() {
+            let intent = intent::load(&default_path)?;
+            intent::check(&model, &intent)
+        } else {
+            vec![]
+        }
+    };
+
+    // Resolve changed paths from baseline diff (if available)
+    let changed_paths: HashSet<String> = {
+        let mut set = HashSet::new();
+        if let Ok(store) = SnapshotStore::open(path) {
+            if let Ok(Some(baseline)) = store.load_baseline() {
+                if let Ok(Some(baseline_model)) = store.load(&baseline.label) {
+                    let d = diff(&baseline_model, &model);
+                    for m in &d.modules_added { set.insert(m.path.clone()); }
+                    for m in &d.modules_removed { set.insert(m.path.clone()); }
+                }
+            }
+        }
+        set
+    };
+
+    let canon = path.canonicalize()?;
+    let report = compute_flows_full(&model, &canon, &violations, &changed_paths);
+    let json = serde_json::to_string_pretty(&report)?;
+
+    eprintln!(
+        "  {} flows, {} functions, {}/{} calls resolved",
+        report.summaries.flows.len(),
+        report.summaries.functions,
+        report.summaries.resolved_calls,
+        report.summaries.resolved_calls + report.summaries.unresolved_calls,
+    );
+
+    if let Some(out_path) = output {
+        std::fs::write(out_path, &json)?;
+        eprintln!("  written → {}", out_path.display());
+    } else {
+        println!("{json}");
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

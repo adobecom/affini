@@ -121,21 +121,23 @@ pub fn check(model: &Model, intent: &IntentFile) -> Vec<Violation> {
     // Equivalently: if from is in layer i and to is in layer j where j < i, violation.
     let layers = &intent.rules.layers;
     if layers.len() > 1 {
-        let layer_idx: HashMap<String, usize> = layers
+        // Precompute each layer's path set once in declared order, then build a
+        // path→layer-index map for O(1) per-edge lookup (avoids re-resolving
+        // glob sets inside the edge loop).
+        let layer_sets: Vec<std::collections::HashSet<&str>> = layers
             .iter()
-            .enumerate()
-            .map(|(i, l)| (l.clone(), i))
+            .map(|name| resolve_boundary_or_glob(&boundary_files, name))
             .collect();
 
-        let module_layer = |path: &str| -> Option<usize> {
-            for (name, idx) in &layer_idx {
-                let set = resolve_boundary_or_glob(&boundary_files, name);
-                if set.contains(path) {
-                    return Some(*idx);
+        let mut path_to_layer: HashMap<&str, usize> = HashMap::new();
+        for m in &model.modules {
+            for (i, set) in layer_sets.iter().enumerate() {
+                if set.contains(m.path.as_str()) {
+                    path_to_layer.insert(m.path.as_str(), i);
+                    break; // first-match-wins, same as assign_layers
                 }
             }
-            None
-        };
+        }
 
         for edge in &model.edges {
             let from_path = model
@@ -147,7 +149,7 @@ pub fn check(model: &Model, intent: &IntentFile) -> Vec<Violation> {
                 .map(|m| m.path.as_str())
                 .unwrap_or("");
 
-            if let (Some(fi), Some(ti)) = (module_layer(from_path), module_layer(to_path)) {
+            if let (Some(&fi), Some(&ti)) = (path_to_layer.get(from_path), path_to_layer.get(to_path)) {
                 // from is in higher layer importing a lower layer: ok.
                 // from is in lower layer importing a higher layer: violation.
                 if fi < ti {
@@ -178,13 +180,19 @@ pub fn assign_layers(model: &Model, intent: &IntentFile) -> HashMap<NodeId, Stri
     }
 
     let boundary_files = expand_boundaries(model, &intent.boundaries);
-    let mut result: HashMap<NodeId, String> = HashMap::new();
 
+    // Precompute each layer's path set once in declared order.  First-match-wins
+    // semantics are preserved; the inner break exits as soon as a layer matches.
+    let layer_sets: Vec<(&String, std::collections::HashSet<&str>)> = layers
+        .iter()
+        .map(|name| (name, resolve_boundary_or_glob(&boundary_files, name)))
+        .collect();
+
+    let mut result: HashMap<NodeId, String> = HashMap::new();
     for m in &model.modules {
-        for layer_name in layers {
-            let set = resolve_boundary_or_glob(&boundary_files, layer_name);
+        for (layer_name, set) in &layer_sets {
             if set.contains(m.path.as_str()) {
-                result.insert(m.id, layer_name.clone());
+                result.insert(m.id, (*layer_name).clone());
                 break;
             }
         }
@@ -243,5 +251,229 @@ fn glob_match(pattern: &str, path: &str) -> bool {
         pat.matches(path)
     } else {
         path.contains(pattern)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{Edge, EdgeKind, Model, Module};
+
+    fn make_module(id: u32, path: &str) -> Module {
+        Module { id, path: path.to_string(), is_file: true, exports: vec![] }
+    }
+
+    fn make_edge(from: u32, to: u32) -> Edge {
+        Edge { from, to, kind: EdgeKind::Imports, specifier: String::new() }
+    }
+
+    fn make_intent(layers: Vec<&str>, boundaries: Vec<(&str, Vec<&str>)>) -> IntentFile {
+        IntentFile {
+            boundaries: boundaries
+                .into_iter()
+                .map(|(k, vs)| (k.to_string(), vs.into_iter().map(|s| s.to_string()).collect()))
+                .collect(),
+            rules: Rules {
+                layers: layers.into_iter().map(|s| s.to_string()).collect(),
+                forbidden: vec![],
+                canonical: vec![],
+            },
+        }
+    }
+
+    // ── assign_layers ─────────────────────────────────────────────────────────
+
+    #[test]
+    fn assign_layers_basic() {
+        let model = Model {
+            modules: vec![
+                make_module(1, "core/src/lib.rs"),
+                make_module(2, "ui/src/app.tsx"),
+                make_module(3, "cli/src/main.rs"),
+            ],
+            ..Default::default()
+        };
+        let intent = make_intent(
+            vec!["core", "cli", "ui"],
+            vec![
+                ("core", vec!["core/**"]),
+                ("cli",  vec!["cli/**"]),
+                ("ui",   vec!["ui/**"]),
+            ],
+        );
+        let result = assign_layers(&model, &intent);
+        assert_eq!(result.get(&1).map(|s| s.as_str()), Some("core"));
+        assert_eq!(result.get(&2).map(|s| s.as_str()), Some("ui"));
+        assert_eq!(result.get(&3).map(|s| s.as_str()), Some("cli"));
+    }
+
+    #[test]
+    fn assign_layers_first_match_wins() {
+        // Module matches both "core" and "shared" globs; "core" is declared first.
+        let model = Model {
+            modules: vec![make_module(1, "core/shared/util.rs")],
+            ..Default::default()
+        };
+        let intent = make_intent(
+            vec!["core", "shared"],
+            vec![
+                ("core",   vec!["core/**"]),
+                ("shared", vec!["core/shared/**"]),
+            ],
+        );
+        let result = assign_layers(&model, &intent);
+        assert_eq!(result.get(&1).map(|s| s.as_str()), Some("core"));
+    }
+
+    #[test]
+    fn assign_layers_unmatched_module_omitted() {
+        let model = Model {
+            modules: vec![
+                make_module(1, "core/src/lib.rs"),
+                make_module(2, "scripts/generate.py"),  // matches no layer
+            ],
+            ..Default::default()
+        };
+        let intent = make_intent(
+            vec!["core"],
+            vec![("core", vec!["core/**"])],
+        );
+        let result = assign_layers(&model, &intent);
+        assert!(result.contains_key(&1));
+        assert!(!result.contains_key(&2), "unmatched module must be omitted");
+    }
+
+    #[test]
+    fn assign_layers_empty_layers_returns_empty() {
+        let model = Model {
+            modules: vec![make_module(1, "core/src/lib.rs")],
+            ..Default::default()
+        };
+        let intent = make_intent(vec![], vec![("core", vec!["core/**"])]);
+        let result = assign_layers(&model, &intent);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn assign_layers_raw_glob_name() {
+        // Layer name that is itself a glob pattern (no matching boundary key).
+        // The fallback in resolve_boundary_or_glob matches against paths that were
+        // already expanded from *named* boundaries, so both modules must be reachable
+        // via at least one named boundary for the raw-glob path to exercise them.
+        let model = Model {
+            modules: vec![
+                make_module(1, "core/lib.rs"),
+                make_module(2, "core/util.rs"),
+            ],
+            ..Default::default()
+        };
+        // "sources" is a named boundary that covers both modules. The layer name
+        // "core/**" is not a boundary key, so it falls back to glob-matching the
+        // already-expanded path set.
+        let intent = make_intent(
+            vec!["core/**"],
+            vec![("sources", vec!["core/**"])],
+        );
+        let result = assign_layers(&model, &intent);
+        assert_eq!(result.get(&1).map(|s| s.as_str()), Some("core/**"));
+        assert_eq!(result.get(&2).map(|s| s.as_str()), Some("core/**"));
+    }
+
+    // ── layer violation check ─────────────────────────────────────────────────
+
+    #[test]
+    fn check_lower_imports_higher_is_violation() {
+        // core (layer 0) imports ui (layer 2) → violation
+        let model = Model {
+            modules: vec![
+                make_module(1, "core/lib.rs"),
+                make_module(2, "ui/app.tsx"),
+            ],
+            edges: vec![make_edge(1, 2)],
+            ..Default::default()
+        };
+        let intent = make_intent(
+            vec!["core", "cli", "ui"],
+            vec![
+                ("core", vec!["core/**"]),
+                ("cli",  vec!["cli/**"]),
+                ("ui",   vec!["ui/**"]),
+            ],
+        );
+        let violations = check(&model, &intent);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].severity, Severity::Error);
+        assert!(violations[0].rule.contains("core"));
+        assert!(violations[0].rule.contains("ui"));
+    }
+
+    #[test]
+    fn check_higher_imports_lower_is_ok() {
+        // ui (layer 2) imports core (layer 0) → ok
+        let model = Model {
+            modules: vec![
+                make_module(1, "core/lib.rs"),
+                make_module(2, "ui/app.tsx"),
+            ],
+            edges: vec![make_edge(2, 1)],
+            ..Default::default()
+        };
+        let intent = make_intent(
+            vec!["core", "cli", "ui"],
+            vec![
+                ("core", vec!["core/**"]),
+                ("cli",  vec!["cli/**"]),
+                ("ui",   vec!["ui/**"]),
+            ],
+        );
+        let violations = check(&model, &intent);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn check_same_layer_import_is_ok() {
+        let model = Model {
+            modules: vec![
+                make_module(1, "core/a.rs"),
+                make_module(2, "core/b.rs"),
+            ],
+            edges: vec![make_edge(1, 2)],
+            ..Default::default()
+        };
+        let intent = make_intent(
+            vec!["core", "ui"],
+            vec![
+                ("core", vec!["core/**"]),
+                ("ui",   vec!["ui/**"]),
+            ],
+        );
+        let violations = check(&model, &intent);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn check_unlayered_modules_produce_no_violations() {
+        // Edge between modules outside any declared layer → no violation
+        let model = Model {
+            modules: vec![
+                make_module(1, "scripts/a.py"),
+                make_module(2, "scripts/b.py"),
+            ],
+            edges: vec![make_edge(1, 2)],
+            ..Default::default()
+        };
+        let intent = make_intent(
+            vec!["core", "ui"],
+            vec![
+                ("core", vec!["core/**"]),
+                ("ui",   vec!["ui/**"]),
+            ],
+        );
+        let violations = check(&model, &intent);
+        assert!(violations.is_empty());
     }
 }
