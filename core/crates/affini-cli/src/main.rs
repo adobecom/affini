@@ -1,3 +1,5 @@
+mod ai;
+
 use affini_core::{
     diff::diff,
     dupes::{find_dupes, DEFAULT_THRESHOLD},
@@ -12,7 +14,7 @@ use axum::{
     extract::{Path as AxumPath, Query as AxumQuery, State},
     http::StatusCode,
     response::{IntoResponse, Json},
-    routing::get,
+    routing::{get, post},
     Router,
 };
 use clap::{Parser, Subcommand};
@@ -302,8 +304,10 @@ async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result
         .route("/api/diff",         get(handler_diff))
         .route("/api/baseline",     get(handler_baseline_get).post(handler_baseline_post))
         .route("/api/dupes",        get(handler_dupes))
-        .route("/api/flows",        get(handler_flows))
-        .route("/api/flows/:id",    get(handler_flow_by_id))
+        .route("/api/flows",              get(handler_flows))
+        .route("/api/flows/:id",          get(handler_flow_by_id))
+        .route("/api/flows/:id/explain",  post(handler_flow_explain))
+        .route("/api/ai/status",          get(handler_ai_status))
         .layer(cors)
         .with_state(state);
 
@@ -607,6 +611,57 @@ async fn handler_flow_by_id(
     match report.flows.into_iter().find(|f| f.id == id) {
         Some(flow) => json_ok(flow),
         None => (StatusCode::NOT_FOUND, format!("flow '{}' not found", id)).into_response(),
+    }
+}
+
+// GET /api/ai/status — reports whether the AI feature is available.
+async fn handler_ai_status() -> impl IntoResponse {
+    #[derive(Serialize)]
+    struct Status { enabled: bool }
+    json_ok(Status { enabled: ai::api_key().is_some() })
+}
+
+// POST /api/flows/:id/explain — returns a plain-English risk assessment for a flow.
+async fn handler_flow_explain(
+    State(s): State<AppState>,
+    AxumPath(id): AxumPath<String>,
+) -> impl IntoResponse {
+    if ai::api_key().is_none() {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "AI summaries disabled — set ANTHROPIC_API_KEY",
+        )
+            .into_response();
+    }
+
+    let model = match scan(&s.root) {
+        Ok(m) => m,
+        Err(e) => return err500(e),
+    };
+    let violations = match load_intent_opt(&s) {
+        Some(intent) => intent::check(&model, &intent),
+        None => vec![],
+    };
+    let changed_paths = resolve_changed_paths(&s, &model);
+    let report = compute_flows_full(&model, &s.root, &violations, &changed_paths);
+
+    let flow = match report.flows.into_iter().find(|f| f.id == id) {
+        Some(f) => f,
+        None => return (StatusCode::NOT_FOUND, format!("flow '{}' not found", id)).into_response(),
+    };
+
+    let flow_json = match serde_json::to_string(&flow) {
+        Ok(j) => j,
+        Err(e) => return err500(e),
+    };
+
+    match ai::explain_flow(&flow_json).await {
+        Ok(text) => {
+            #[derive(Serialize)]
+            struct Explanation { explanation: String }
+            json_ok(Explanation { explanation: text })
+        }
+        Err(e) => err500(e),
     }
 }
 

@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from 'react'
-import { Play, Pause, SkipForward, SkipBack, RotateCcw, Workflow } from 'lucide-react'
-import { fetchFlows, fetchFlow, type FlowSummary, type Flow, type FragilitySummary } from '../api'
+import { useEffect, useState, useCallback, useRef } from 'react'
+import { Play, Pause, SkipForward, SkipBack, RotateCcw, Workflow, Sparkles } from 'lucide-react'
+import { fetchFlows, fetchFlow, fetchAiStatus, explainFlow, type FlowSummary, type Flow, type FragilitySummary } from '../api'
 import { FlowTimeline } from './flows/FlowTimeline'
 import { StepContractPanel } from './flows/StepContractPanel'
 
@@ -54,12 +54,19 @@ export default function FlowsView() {
   const [stepIndex, setStepIndex] = useState(0)
   const [playing, setPlaying]     = useState(false)
 
+  // AI feature state
+  const [aiEnabled, setAiEnabled]         = useState(false)
+  const [explanation, setExplanation]     = useState<string | null>(null)
+  const [explainLoading, setExplainLoading] = useState(false)
+  const [explainError, setExplainError]   = useState<string | null>(null)
+  const explainGenRef = useRef(0)
+
   // setStepIndex also accepts an updater function (from rAF tick in FlowTimeline)
   const handleStepChange = useCallback((indexOrUpdater: number | ((prev: number) => number)) => {
     setStepIndex(indexOrUpdater as number)
   }, [])
 
-  // load summaries on mount
+  // load summaries + AI status on mount
   useEffect(() => {
     setLoading(true)
     setError(null)
@@ -67,6 +74,10 @@ export default function FlowsView() {
       .then(setSummaries)
       .catch(e => setError(e instanceof Error ? e.message : String(e)))
       .finally(() => setLoading(false))
+
+    fetchAiStatus()
+      .then(s => setAiEnabled(s.enabled))
+      .catch(() => setAiEnabled(false))
   }, [])
 
   // load full flow when selectedId changes
@@ -76,6 +87,10 @@ export default function FlowsView() {
     setFlow(null)
     setStepIndex(0)
     setPlaying(false)
+    // clear any previous explanation
+    setExplanation(null)
+    setExplainError(null)
+    explainGenRef.current++
     fetchFlow(selectedId)
       .then(setFlow)
       .catch(e => setError(e instanceof Error ? e.message : String(e)))
@@ -90,6 +105,28 @@ export default function FlowsView() {
   function handleBack()    { setPlaying(false); setStepIndex(i => Math.max(0, i - 1)) }
   function handleForward() { setPlaying(false); setStepIndex(i => Math.min((flow?.steps.length ?? 1) - 1, i + 1)) }
   function handleReset()   { setPlaying(false); setStepIndex(0) }
+
+  async function handleExplain() {
+    if (!flow) return
+    const gen = ++explainGenRef.current
+    setExplainLoading(true)
+    setExplainError(null)
+    setExplanation(null)
+    try {
+      const result = await explainFlow(flow.id)
+      if (gen === explainGenRef.current) {
+        setExplanation(result.explanation)
+      }
+    } catch (e) {
+      if (gen === explainGenRef.current) {
+        setExplainError(e instanceof Error ? e.message : String(e))
+      }
+    } finally {
+      if (gen === explainGenRef.current) {
+        setExplainLoading(false)
+      }
+    }
+  }
 
   const activeStep = flow?.steps[stepIndex] ?? null
 
@@ -220,6 +257,28 @@ export default function FlowsView() {
             {playing ? <Pause size={13} /> : <Play size={13} />}
           </PlayBtn>
           <PlayBtn onClick={handleForward} title="Forward" disabled={!canForward}><SkipForward size={13} /></PlayBtn>
+          {aiEnabled && (
+            <button
+              onClick={handleExplain}
+              disabled={!flow || explainLoading}
+              title="Ask Claude to explain this flow's risks"
+              style={{
+                display: 'flex', alignItems: 'center', gap: 5,
+                padding: '0 10px', height: 28, borderRadius: 6,
+                background: explainLoading ? 'transparent' : 'rgba(99,102,241,0.15)',
+                border: '1px solid var(--border)',
+                color: !flow || explainLoading ? 'var(--text-muted)' : 'var(--accent)',
+                cursor: !flow || explainLoading ? 'not-allowed' : 'pointer',
+                opacity: !flow || explainLoading ? 0.5 : 1,
+                fontSize: 12, fontFamily: 'inherit',
+                marginLeft: 6,
+                transition: 'opacity 0.1s',
+              }}
+            >
+              <Sparkles size={12} />
+              {explainLoading ? 'Explaining…' : 'Explain'}
+            </button>
+          )}
         </div>
 
         {/* timeline body */}
@@ -242,13 +301,52 @@ export default function FlowsView() {
         </div>
       </div>
 
-      {/* ── Right panel: contract ─────────────────────────────────────────── */}
+      {/* ── Right panel: contract + AI summary ───────────────────────────── */}
       <div style={{
         width: 300, flexShrink: 0,
         borderLeft: '1px solid var(--border)',
         overflow: 'hidden',
         display: 'flex', flexDirection: 'column',
       }}>
+        {/* AI summary section — shown only when key is present */}
+        {aiEnabled && (explanation || explainError || explainLoading) && (
+          <div style={{
+            borderBottom: '1px solid var(--border)',
+            flexShrink: 0, maxHeight: 220, overflowY: 'auto',
+          }}>
+            <div style={{
+              padding: '8px 14px 6px',
+              fontSize: 11, fontWeight: 700, letterSpacing: '0.06em',
+              textTransform: 'uppercase', color: 'var(--accent)',
+              display: 'flex', alignItems: 'center', gap: 5,
+            }}>
+              <Sparkles size={11} /> AI Summary
+            </div>
+            <div style={{ padding: '0 14px 12px' }}>
+              {explainLoading && (
+                <span style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+                  Asking Claude…
+                </span>
+              )}
+              {explainError && (
+                <span style={{ fontSize: 12, color: 'var(--error)' }}>
+                  {explainError}
+                </span>
+              )}
+              {explanation && (
+                <p style={{
+                  margin: 0,
+                  fontSize: 12, lineHeight: 1.6,
+                  color: 'var(--text)',
+                  whiteSpace: 'pre-wrap',
+                }}>
+                  {explanation}
+                </p>
+              )}
+            </div>
+          </div>
+        )}
+
         <div style={{
           padding: '10px 14px',
           borderBottom: '1px solid var(--border)',

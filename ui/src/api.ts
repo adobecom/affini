@@ -208,3 +208,9 @@ export interface Flow extends FlowSummary {
 
 export const fetchFlows = () => request<FlowSummary[]>('/flows')
 export const fetchFlow  = (id: string) => request<Flow>(`/flows/${encodeURIComponent(id)}`)
+
+// ── AI (optional) ──────────────────────────────────────────────────────────
+
+export const fetchAiStatus = () => request<{ enabled: boolean }>('/ai/status')
+export const explainFlow   = (id: string) =>
+  request<{ explanation: string }>(`/flows/${encodeURIComponent(id)}/explain`, { method: 'POST' })
