@@ -234,7 +234,7 @@ export default function GraphView() {
           dimmed:      !isActive,
         }
       })
-  }, [model, visibleModules, violations, violEdgeKeys, neighborhood])
+  }, [model, visibleModules, violEdgeKeys, neighborhood])
 
   // ── selection handlers ────────────────────────────────────────────────────
   const handleNodeClick = useCallback((id: number) => {
@@ -257,7 +257,12 @@ export default function GraphView() {
 
   // ── aggregate stats ───────────────────────────────────────────────────────
   const cycleCount = model
-    ? new Set(model.modules.filter(m => (model.metrics[m.id]?.scc_size ?? 0) > 1).map(m => model.metrics[m.id]?.scc_id)).size
+    ? new Set(
+        model.modules
+          .filter(m => (model.metrics[m.id]?.scc_size ?? 0) > 1)
+          .map(m => model.metrics[m.id]?.scc_id)
+          .filter((id): id is number => id !== undefined),
+      ).size
     : 0
   const violCount = violations.filter(v => v.severity === 'Error').length
 

@@ -85,9 +85,16 @@ function edgePath(sx: number, sy: number, tx: number, ty: number, tw: number): s
   const dx = tx - sx, dy = ty - sy
   const len = Math.sqrt(dx * dx + dy * dy) || 1
   const ux = dx / len, uy = dy / len
-  // End before the target node's border so the arrowhead sits outside it
-  const ex = tx - ux * (tw / 2 + ARROW + 3)
-  const ey = ty - uy * (NODE_H / 2 + ARROW + 3)
+  // Correct rectangle-border intersection: find the shortest distance from
+  // the target center (travelling backward) to reach the node boundary.
+  const hw = tw / 2 + ARROW + 3       // horizontal half-extent + arrowhead margin
+  const hh = NODE_H / 2 + ARROW + 3   // vertical half-extent + arrowhead margin
+  const tBorder = Math.min(
+    Math.abs(ux) > 1e-9 ? hw / Math.abs(ux) : Infinity,
+    Math.abs(uy) > 1e-9 ? hh / Math.abs(uy) : Infinity,
+  )
+  const ex = tx - ux * tBorder
+  const ey = ty - uy * tBorder
   // Slight perpendicular bend for visual clarity on overlapping edges
   const bend = Math.min(len * 0.08, 22)
   const cx = (sx + ex) / 2 - uy * bend
