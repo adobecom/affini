@@ -1,5 +1,7 @@
 import type { FlowStep, FragilityFlag } from '../../api'
 import { TypeShapeView } from './TypeShapeView'
+import { InfoTip } from '../../components/InfoTip'
+import { METRIC_HELP } from '../../metricHelp'
 
 interface Props {
   step: FlowStep | null
@@ -26,8 +28,18 @@ function FragilityCard({ flag }: { flag: FragilityFlag }) {
         <span style={{
           fontSize: 10, fontWeight: 700, letterSpacing: '0.05em',
           color, textTransform: 'uppercase',
+          display: 'flex', alignItems: 'center',
         }}>
           {flag.source}
+          {flag.source === 'Metric' && (
+            <InfoTip title={METRIC_HELP.fragility_metric.label}>{METRIC_HELP.fragility_metric.body}</InfoTip>
+          )}
+          {flag.source === 'Type' && (
+            <InfoTip title={METRIC_HELP.fragility_type.label}>{METRIC_HELP.fragility_type.body}</InfoTip>
+          )}
+          {flag.source === 'Churn' && (
+            <InfoTip title={METRIC_HELP.fragility_churn.label}>{METRIC_HELP.fragility_churn.body}</InfoTip>
+          )}
         </span>
         <span style={{
           fontSize: 10,

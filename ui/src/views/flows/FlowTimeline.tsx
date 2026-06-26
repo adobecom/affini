@@ -1,51 +1,19 @@
-import { useEffect, useRef } from 'react'
+/**
+ * Presentational scrubber strip — pure step list with click-to-seek.
+ * Auto-advance timer lives in FlowsView (single source of truth).
+ */
 import type { Flow, FlowStep } from '../../api'
-
-const STEP_MS = 1100   // ms per auto-advance tick
 
 interface Props {
   flow: Flow
   stepIndex: number
-  playing: boolean
-  onStepChange: (indexOrUpdater: number | ((prev: number) => number)) => void
-  onPlayingChange: (playing: boolean) => void
+  compact?: boolean
+  onStepChange: (index: number) => void
 }
 
-export function FlowTimeline({ flow, stepIndex, playing, onStepChange, onPlayingChange }: Props) {
-  const rafRef = useRef<number | null>(null)
-  const lastTickRef = useRef<number>(0)
+export function FlowTimeline({ flow, stepIndex, compact, onStepChange }: Props) {
   const steps = flow.steps
-
-  // rAF-based auto-advance (same timestamp-accumulation pattern as ForceGraph.tsx)
-  useEffect(() => {
-    if (!playing) {
-      if (rafRef.current !== null) {
-        cancelAnimationFrame(rafRef.current)
-        rafRef.current = null
-      }
-      return
-    }
-    lastTickRef.current = performance.now()
-
-    function tick(now: number) {
-      if (now - lastTickRef.current >= STEP_MS) {
-        lastTickRef.current = now
-        onStepChange((prev: number) => {
-          if (prev >= steps.length - 1) {
-            onPlayingChange(false)
-            return prev
-          }
-          return prev + 1
-        })
-      }
-      rafRef.current = requestAnimationFrame(tick)
-    }
-
-    rafRef.current = requestAnimationFrame(tick)
-    return () => {
-      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
-    }
-  }, [playing, steps.length, onStepChange, onPlayingChange])
+  const pad   = compact ? '6px 10px' : '10px 14px'
 
   if (steps.length === 0) {
     return (
@@ -61,7 +29,7 @@ export function FlowTimeline({ flow, stepIndex, playing, onStepChange, onPlaying
   return (
     <div style={{
       height: '100%', overflow: 'auto',
-      padding: '10px 14px',
+      padding: pad,
     }}>
       {steps.map((step, i) => (
         <StepRow
@@ -70,6 +38,7 @@ export function FlowTimeline({ flow, stepIndex, playing, onStepChange, onPlaying
           index={i}
           active={i === stepIndex}
           past={i < stepIndex}
+          compact={compact}
           onClick={() => onStepChange(i)}
         />
       ))}
@@ -90,11 +59,12 @@ interface RowProps {
   index: number
   active: boolean
   past: boolean
+  compact?: boolean
   onClick: () => void
 }
 
-function StepRow({ step, index, active, past, onClick }: RowProps) {
-  const indent = step.depth * 18
+function StepRow({ step, index, active, past, compact, onClick }: RowProps) {
+  const indent = step.depth * (compact ? 12 : 18)
   const errorCount   = step.fragility.filter(f => f.severity === 'Error').length
   const warningCount = step.fragility.filter(f => f.severity === 'Warning').length
 
@@ -103,9 +73,9 @@ function StepRow({ step, index, active, past, onClick }: RowProps) {
       onClick={onClick}
       style={{
         display: 'flex', alignItems: 'center', gap: 8,
-        marginBottom: 3,
-        padding: '6px 8px',
-        paddingLeft: 8 + indent,
+        marginBottom: compact ? 2 : 3,
+        padding: compact ? '4px 6px' : '6px 8px',
+        paddingLeft: (compact ? 6 : 8) + indent,
         borderRadius: 6,
         cursor: 'pointer',
         transition: 'background 0.15s, box-shadow 0.15s',
@@ -122,9 +92,9 @@ function StepRow({ step, index, active, past, onClick }: RowProps) {
       {step.depth > 0 && (
         <div style={{
           position: 'absolute',
-          left: 8 + (step.depth - 1) * 18 + 9,
+          left: (compact ? 6 : 8) + (step.depth - 1) * (compact ? 12 : 18) + 9,
           width: 1,
-          height: 26,
+          height: 22,
           background: active ? 'var(--accent)' : 'var(--border)',
           pointerEvents: 'none',
           marginTop: -3,
@@ -135,7 +105,7 @@ function StepRow({ step, index, active, past, onClick }: RowProps) {
       <span style={{
         fontSize: 10, fontFamily: 'var(--mono)',
         color: active ? 'var(--accent)' : 'var(--text-muted)',
-        minWidth: 20, textAlign: 'right', flexShrink: 0,
+        minWidth: 18, textAlign: 'right', flexShrink: 0,
       }}>
         {index + 1}
       </span>
@@ -143,8 +113,8 @@ function StepRow({ step, index, active, past, onClick }: RowProps) {
       {/* labels */}
       <div style={{ flex: 1, overflow: 'hidden' }}>
         <div style={{
-          display: 'flex', alignItems: 'center', gap: 5, flexWrap: 'wrap',
-          fontSize: 12, fontFamily: 'var(--mono)',
+          display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap',
+          fontSize: compact ? 11 : 12, fontFamily: 'var(--mono)',
         }}>
           <span style={{ color: 'var(--text-muted)', flexShrink: 0 }}>
             {step.from.name}

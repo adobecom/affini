@@ -2,7 +2,12 @@ import { useEffect, useState, useCallback, useRef } from 'react'
 import { Play, Pause, SkipForward, SkipBack, RotateCcw, Workflow, Sparkles } from 'lucide-react'
 import { fetchFlows, fetchFlow, fetchAiStatus, explainFlow, type FlowSummary, type Flow, type FragilitySummary } from '../api'
 import { FlowTimeline } from './flows/FlowTimeline'
+import { FlowGraph } from './flows/FlowGraph'
 import { StepContractPanel } from './flows/StepContractPanel'
+
+// ── constants ─────────────────────────────────────────────────────────────────
+
+const STEP_MS = 1100  // ms per auto-advance tick (single source of truth)
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
@@ -33,9 +38,9 @@ function FragilityBar({ s }: { s: FragilitySummary }) {
       <span style={{ color, fontWeight: 600 }}>
         {s.fragile_steps}/{s.total_steps}
       </span>
-      {s.metric_flags > 0 && <span style={{ color: 'var(--error)', fontFamily: 'var(--mono)' }}>M:{s.metric_flags}</span>}
-      {s.type_flags   > 0 && <span style={{ color: 'var(--warning, #fbbf24)', fontFamily: 'var(--mono)' }}>T:{s.type_flags}</span>}
-      {s.churn_flags  > 0 && <span style={{ color: 'var(--accent)', fontFamily: 'var(--mono)' }}>C:{s.churn_flags}</span>}
+      {s.metric_flags > 0 && <span style={{ color: 'var(--error)', fontFamily: 'var(--mono)' }} title="Metric flags: SCC cycle, high instability, or architectural violation at this step">M:{s.metric_flags}</span>}
+      {s.type_flags   > 0 && <span style={{ color: 'var(--warning, #fbbf24)', fontFamily: 'var(--mono)' }} title="Type flags: any/unknown params or untyped boundaries">T:{s.type_flags}</span>}
+      {s.churn_flags  > 0 && <span style={{ color: 'var(--accent)', fontFamily: 'var(--mono)' }} title="Churn flags: caller or callee changed since baseline snapshot">C:{s.churn_flags}</span>}
     </div>
   )
 }
@@ -55,18 +60,47 @@ export default function FlowsView() {
   const [playing, setPlaying]     = useState(false)
 
   // AI feature state
-  const [aiEnabled, setAiEnabled]         = useState(false)
-  const [explanation, setExplanation]     = useState<string | null>(null)
+  const [aiEnabled, setAiEnabled]           = useState(false)
+  const [explanation, setExplanation]       = useState<string | null>(null)
   const [explainLoading, setExplainLoading] = useState(false)
-  const [explainError, setExplainError]   = useState<string | null>(null)
+  const [explainError, setExplainError]     = useState<string | null>(null)
   const explainGenRef = useRef(0)
 
-  // setStepIndex also accepts an updater function (from rAF tick in FlowTimeline)
-  const handleStepChange = useCallback((indexOrUpdater: number | ((prev: number) => number)) => {
-    setStepIndex(indexOrUpdater as number)
-  }, [])
+  // ── auto-advance rAF timer (single source of truth) ───────────────────────
+  const rafRef      = useRef<number | null>(null)
+  const lastTickRef = useRef<number>(0)
 
-  // load summaries + AI status on mount
+  useEffect(() => {
+    if (!playing || !flow) {
+      if (rafRef.current !== null) {
+        cancelAnimationFrame(rafRef.current)
+        rafRef.current = null
+      }
+      return
+    }
+    lastTickRef.current = performance.now()
+
+    function tick(now: number) {
+      if (now - lastTickRef.current >= STEP_MS) {
+        lastTickRef.current = now
+        setStepIndex(prev => {
+          if (prev >= (flow?.steps.length ?? 1) - 1) {
+            setPlaying(false)
+            return prev
+          }
+          return prev + 1
+        })
+      }
+      rafRef.current = requestAnimationFrame(tick)
+    }
+
+    rafRef.current = requestAnimationFrame(tick)
+    return () => {
+      if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
+    }
+  }, [playing, flow?.steps.length])
+
+  // ── data fetching ─────────────────────────────────────────────────────────
   useEffect(() => {
     setLoading(true)
     setError(null)
@@ -80,14 +114,12 @@ export default function FlowsView() {
       .catch(() => setAiEnabled(false))
   }, [])
 
-  // load full flow when selectedId changes
   useEffect(() => {
     if (!selectedId) return
     setFlowLoading(true)
     setFlow(null)
     setStepIndex(0)
     setPlaying(false)
-    // clear any previous explanation
     setExplanation(null)
     setExplainError(null)
     explainGenRef.current++
@@ -97,15 +129,20 @@ export default function FlowsView() {
       .finally(() => setFlowLoading(false))
   }, [selectedId])
 
-  // playback controls
+  // ── playback controls ─────────────────────────────────────────────────────
   const canBack    = !!flow && stepIndex > 0
   const canForward = !!flow && stepIndex < flow.steps.length - 1
 
-  function handlePlay()    { setPlaying(p => !p) }
-  function handleBack()    { setPlaying(false); setStepIndex(i => Math.max(0, i - 1)) }
-  function handleForward() { setPlaying(false); setStepIndex(i => Math.min((flow?.steps.length ?? 1) - 1, i + 1)) }
-  function handleReset()   { setPlaying(false); setStepIndex(0) }
+  function handlePlay()      { setPlaying(p => !p) }
+  function handleBack()      { setPlaying(false); setStepIndex(i => Math.max(0, i - 1)) }
+  function handleForward()   { setPlaying(false); setStepIndex(i => Math.min((flow?.steps.length ?? 1) - 1, i + 1)) }
+  function handleReset()     { setPlaying(false); setStepIndex(0) }
+  const handleStepSelect = useCallback((i: number) => {
+    setPlaying(false)
+    setStepIndex(i)
+  }, [])
 
+  // ── AI explain ────────────────────────────────────────────────────────────
   async function handleExplain() {
     if (!flow) return
     const gen = ++explainGenRef.current
@@ -114,26 +151,19 @@ export default function FlowsView() {
     setExplanation(null)
     try {
       const result = await explainFlow(flow.id)
-      if (gen === explainGenRef.current) {
-        setExplanation(result.explanation)
-      }
+      if (gen === explainGenRef.current) setExplanation(result.explanation)
     } catch (e) {
-      if (gen === explainGenRef.current) {
+      if (gen === explainGenRef.current)
         setExplainError(e instanceof Error ? e.message : String(e))
-      }
     } finally {
-      if (gen === explainGenRef.current) {
-        setExplainLoading(false)
-      }
+      if (gen === explainGenRef.current) setExplainLoading(false)
     }
   }
 
   const activeStep = flow?.steps[stepIndex] ?? null
 
   return (
-    <div style={{
-      display: 'flex', height: '100%', overflow: 'hidden',
-    }}>
+    <div style={{ display: 'flex', height: '100%', overflow: 'hidden' }}>
       <style>{`
         @keyframes pulse-dot {
           0%, 100% { opacity: 1; }
@@ -218,7 +248,7 @@ export default function FlowsView() {
         </div>
       </div>
 
-      {/* ── Center panel: timeline ────────────────────────────────────────── */}
+      {/* ── Center panel: graph hero + timeline scrubber ──────────────────── */}
       <div style={{
         flex: 1, display: 'flex', flexDirection: 'column',
         overflow: 'hidden', minWidth: 0,
@@ -281,8 +311,8 @@ export default function FlowsView() {
           )}
         </div>
 
-        {/* timeline body */}
-        <div style={{ flex: 1, overflow: 'hidden', position: 'relative' }}>
+        {/* hero: animated flow graph */}
+        <div style={{ flex: 1, overflow: 'hidden', position: 'relative', minHeight: 0 }}>
           {!selectedId && (
             <CenterMsg>Select a feature flow from the list</CenterMsg>
           )}
@@ -290,15 +320,45 @@ export default function FlowsView() {
             <CenterMsg>Loading flow…</CenterMsg>
           )}
           {flow && (
-            <FlowTimeline
+            <FlowGraph
               flow={flow}
               stepIndex={stepIndex}
               playing={playing}
-              onStepChange={handleStepChange}
-              onPlayingChange={setPlaying}
+              stepDurationMs={STEP_MS}
+              onStepSelect={handleStepSelect}
             />
           )}
         </div>
+
+        {/* scrubber strip: compact step list */}
+        {flow && (
+          <div style={{
+            flexShrink: 0,
+            maxHeight: '32%',
+            borderTop: '1px solid var(--border)',
+            overflow: 'hidden',
+            display: 'flex',
+            flexDirection: 'column',
+          }}>
+            <div style={{
+              padding: '4px 10px',
+              fontSize: 10, fontWeight: 700, letterSpacing: '0.06em',
+              textTransform: 'uppercase', color: 'var(--text-muted)',
+              borderBottom: '1px solid var(--border)',
+              flexShrink: 0,
+            }}>
+              Call sequence
+            </div>
+            <div style={{ flex: 1, overflow: 'auto' }}>
+              <FlowTimeline
+                flow={flow}
+                stepIndex={stepIndex}
+                compact
+                onStepChange={handleStepSelect}
+              />
+            </div>
+          </div>
+        )}
       </div>
 
       {/* ── Right panel: contract + AI summary ───────────────────────────── */}
@@ -308,7 +368,7 @@ export default function FlowsView() {
         overflow: 'hidden',
         display: 'flex', flexDirection: 'column',
       }}>
-        {/* AI summary section — shown only when key is present */}
+        {/* AI summary section */}
         {aiEnabled && (explanation || explainError || explainLoading) && (
           <div style={{
             borderBottom: '1px solid var(--border)',

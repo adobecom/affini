@@ -1,6 +1,8 @@
 import { useEffect, useState, useCallback } from 'react'
 import { fetchDupes, type DupesReport, type DupeCluster } from '../api'
 import { Copy, AlertTriangle, Info, ChevronDown, ChevronRight } from 'lucide-react'
+import { InfoTip } from '../components/InfoTip'
+import { METRIC_HELP } from '../metricHelp'
 
 const THRESHOLDS = [0.5, 0.6, 0.7, 0.8, 0.9]
 const DEFAULT_THRESHOLD = 0.6
@@ -84,7 +86,12 @@ export default function DupesView() {
 function ThresholdPicker({ value, onChange }: { value: number; onChange: (t: number) => void }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-      <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Similarity threshold</span>
+      <span style={{ display: 'flex', alignItems: 'center', fontSize: 11, color: 'var(--text-muted)' }}>
+        Similarity threshold
+        <InfoTip title={METRIC_HELP.similarity.label} formula={METRIC_HELP.similarity.formula}>
+          {METRIC_HELP.similarity.body}
+        </InfoTip>
+      </span>
       <div style={{ display: 'flex', gap: 2 }}>
         {THRESHOLDS.map(t => (
           <button
@@ -199,13 +206,16 @@ function ClusterCard({ cluster, rank }: { cluster: DupeCluster; rank: number }) 
 }
 
 function SimilarityBadge({ pct, color }: { pct: number; color: string }) {
+  const help = METRIC_HELP.similarity
   return (
     <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 2,
       fontSize: 11, fontWeight: 700, color,
       background: `color-mix(in srgb, ${color} 15%, transparent)`,
       padding: '2px 8px', borderRadius: 12, flexShrink: 0,
     }}>
       {pct}% similar
+      <InfoTip title={help.label} formula={help.formula}>{help.body}</InfoTip>
     </span>
   )
 }

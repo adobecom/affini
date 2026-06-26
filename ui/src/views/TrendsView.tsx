@@ -5,6 +5,8 @@ import {
   ReferenceLine,
 } from 'recharts'
 import { Info, BookOpen } from 'lucide-react'
+import { InfoTip } from '../components/InfoTip'
+import { METRIC_HELP } from '../metricHelp'
 
 export default function TrendsView() {
   const [points, setPoints] = useState<TrendPoint[]>([])
@@ -183,14 +185,15 @@ function CurrentStats({ point, baseline }: { point: TrendPoint; baseline: Baseli
       <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(120px, 1fr))', gap: 16 }}>
         <Metric label="Files"        value={point.file_count} />
         <Metric label="Import edges" value={point.edge_count} />
-        <Metric label="Avg fan-in"   value={point.avg_fan_in.toFixed(2)} />
-        <Metric label="Avg fan-out"  value={point.avg_fan_out.toFixed(2)} />
-        <Metric label="Avg coupling" value={`${point.avg_coupling.toFixed(2)}%`} />
+        <Metric label="Avg fan-in"   value={point.avg_fan_in.toFixed(2)}   helpKey="avg_fan_in" />
+        <Metric label="Avg fan-out"  value={point.avg_fan_out.toFixed(2)}  helpKey="avg_fan_out" />
+        <Metric label="Avg coupling" value={`${point.avg_coupling.toFixed(2)}%`} helpKey="avg_coupling" />
         {point.violation_count !== null && (
           <Metric
             label="Violations"
             value={point.violation_count}
             color={point.violation_count > 0 ? 'var(--error)' : 'var(--ok)'}
+            helpKey="violation_count"
           />
         )}
       </div>
@@ -198,10 +201,18 @@ function CurrentStats({ point, baseline }: { point: TrendPoint; baseline: Baseli
   )
 }
 
-function Metric({ label, value, color = 'var(--accent)' }: { label: string; value: number | string; color?: string }) {
+function Metric({ label, value, color = 'var(--accent)', helpKey }: { label: string; value: number | string; color?: string; helpKey?: string }) {
+  const help = helpKey ? METRIC_HELP[helpKey] : undefined
   return (
     <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
-      <span style={{ color: 'var(--text-muted)', fontSize: 11 }}>{label}</span>
+      <span style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)', fontSize: 11 }}>
+        {label}
+        {help && (
+          <InfoTip title={help.label} formula={help.formula}>
+            {help.body}
+          </InfoTip>
+        )}
+      </span>
       <span style={{ fontSize: 20, fontWeight: 700, color }}>{value}</span>
     </div>
   )

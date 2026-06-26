@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { fetchViolations, type Violation } from '../api'
 import { AlertTriangle, XCircle, CheckCircle, Loader } from 'lucide-react'
+import { InfoTip } from '../components/InfoTip'
+import { METRIC_HELP } from '../metricHelp'
 
 export default function ScorecardView() {
   const [violations, setViolations] = useState<Violation[] | null>(null)
@@ -23,8 +25,9 @@ export default function ScorecardView() {
   return (
     <div style={{ padding: 24, overflow: 'auto', height: '100%' }}>
       <h2 style={{ fontSize: 16, fontWeight: 600, marginBottom: 4 }}>Conformance Scorecard</h2>
-      <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 24 }}>
-        Violations of declared intent in <code style={{ background: 'var(--surface2)', padding: '1px 4px', borderRadius: 3 }}>affini.toml</code>
+      <p style={{ color: 'var(--text-muted)', fontSize: 13, marginBottom: 24, display: 'flex', alignItems: 'center', gap: 4, flexWrap: 'wrap' }}>
+        {'Violations of declared intent in'} <code style={{ background: 'var(--surface2)', padding: '1px 4px', borderRadius: 3 }}>affini.toml</code>
+        <InfoTip title={METRIC_HELP.violations.label}>{METRIC_HELP.violations.body}</InfoTip>
       </p>
 
       {violations!.length === 0 ? (

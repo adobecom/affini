@@ -27,6 +27,8 @@ import {
 import { ForceGraph, type FGNode, type FGEdge } from './graph/ForceGraph'
 import { buildLayerColors, layerColor } from './graph/layers'
 import { type ModuleSignals } from './graph/ModuleNode'
+import { InfoTip } from '../components/InfoTip'
+import { METRIC_HELP } from '../metricHelp'
 
 // ─── derived signal computation ──────────────────────────────────────────────
 
@@ -383,15 +385,19 @@ export default function GraphView() {
               ))}
             </LegendSection>
             <LegendSection title="Fill colour (instability)">
+              <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', marginBottom: 4 }}>
+                fan_out / (fan_in + fan_out)
+                <InfoTip title={METRIC_HELP.instability.label} formula={METRIC_HELP.instability.formula}>{METRIC_HELP.instability.body}</InfoTip>
+              </span>
               <LegendRow swatch="#6366f1" label="stable (I ≈ 0)" />
               <LegendRow swatch="#fbbf24" label="balanced" />
               <LegendRow swatch="#f87171" label="unstable (I ≈ 1)" />
             </LegendSection>
             <LegendSection title="Badges">
-              <LegendRow swatch="↻" label="dependency cycle" text />
-              <LegendRow swatch="★" label="hub (top-10% fan-in)" text />
-              <LegendRow swatch="⚠" label="violation source" text />
-              <LegendRow swatch="⎘" label="near-duplicate" text />
+              <LegendRow swatch="↻" label="dependency cycle" text extra={<InfoTip title={METRIC_HELP.cycle.label}>{METRIC_HELP.cycle.body}</InfoTip>} />
+              <LegendRow swatch="★" label="hub (top-10% fan-in)" text extra={<InfoTip title={METRIC_HELP.hub.label}>{METRIC_HELP.hub.body}</InfoTip>} />
+              <LegendRow swatch="⚠" label="violation source" text extra={<InfoTip title={METRIC_HELP.violations.label}>{METRIC_HELP.violations.body}</InfoTip>} />
+              <LegendRow swatch="⎘" label="near-duplicate" text extra={<InfoTip title={METRIC_HELP.similarity.label} formula={METRIC_HELP.similarity.formula}>{METRIC_HELP.similarity.body}</InfoTip>} />
             </LegendSection>
             <LegendSection title="Edges">
               <LegendRow swatch="#4338ca" label="import" />
@@ -497,16 +503,17 @@ function DetailPanel({
       </div>
 
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '8px 12px', marginBottom: 12 }}>
-        <Metric label="Fan-in"  value={metrics.fan_in} />
-        <Metric label="Fan-out" value={metrics.fan_out} />
+        <Metric label="Fan-in"  value={metrics.fan_in}  helpKey="fan_in" />
+        <Metric label="Fan-out" value={metrics.fan_out} helpKey="fan_out" />
         <Metric
           label="Instability"
           value={`${(signals.instability * 100).toFixed(0)}%`}
           sub={sdpLabel}
           color={signals.instability > 0.7 ? 'var(--error)' : signals.instability < 0.3 ? 'var(--ok)' : 'var(--warning)'}
+          helpKey="instability"
         />
-        <Metric label="LOC"      value={signals.loc > 0 ? signals.loc : '—'} />
-        <Metric label="Coupling" value={`${(metrics.coupling * 100).toFixed(1)}%`} />
+        <Metric label="LOC"      value={signals.loc > 0 ? signals.loc : '—'} helpKey="loc" />
+        <Metric label="Coupling" value={`${(metrics.coupling * 100).toFixed(1)}%`} helpKey="coupling" />
       </div>
 
       {violations.length > 0 && (
@@ -554,10 +561,16 @@ function DetailPanel({
 
 // ─── small reusables ─────────────────────────────────────────────────────────
 
-function Metric({ label, value, sub, color }: { label: string; value: number | string; sub?: string; color?: string }) {
+function Metric({ label, value, sub, color, helpKey }: { label: string; value: number | string; sub?: string; color?: string; helpKey?: string }) {
+  const help = helpKey ? METRIC_HELP[helpKey] : undefined
   return (
     <div>
-      <div style={{ color: 'var(--text-muted)', fontSize: 10 }}>{label}</div>
+      <div style={{ display: 'flex', alignItems: 'center', color: 'var(--text-muted)', fontSize: 10 }}>
+        {label}
+        {help && (
+          <InfoTip title={help.label} formula={help.formula}>{help.body}</InfoTip>
+        )}
+      </div>
       <div style={{ fontWeight: 700, fontSize: 14, color: color ?? 'var(--text)' }}>{value}</div>
       {sub && <div style={{ color: 'var(--text-muted)', fontSize: 9, lineHeight: 1.3, marginTop: 1 }}>{sub}</div>}
     </div>
@@ -615,13 +628,14 @@ function LegendSection({ title, children }: { title: string; children: React.Rea
   )
 }
 
-function LegendRow({ swatch, label, text }: { swatch: string; label: string; text?: boolean }) {
+function LegendRow({ swatch, label, text, extra }: { swatch: string; label: string; text?: boolean; extra?: React.ReactNode }) {
   return (
     <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
       {text
         ? <span style={{ width: 14, textAlign: 'center', fontSize: 12 }}>{swatch}</span>
         : <span style={{ width: 14, height: 10, borderRadius: 2, background: swatch, flexShrink: 0 }} />}
       <span>{label}</span>
+      {extra}
     </div>
   )
 }
