@@ -75,8 +75,8 @@ export function computeFlowLayout(flow: Flow): FlowLayout {
   }
 
   for (const step of steps) {
-    ensureNode(step.from, Math.max(0, step.depth - 1))
-    ensureNode(step.to,   step.depth)
+    ensureNode(step.from, step.depth)
+    ensureNode(step.to,   step.depth + 1)
   }
 
   // --- 2. Assign row-within-column (first-appearance order)

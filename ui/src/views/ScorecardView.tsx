@@ -76,7 +76,6 @@ function ViolationCard({ v }: { v: Violation }) {
   return (
     <div style={{
       background: 'var(--surface)', border: `1px solid ${isError ? 'var(--error)' : 'var(--warning)'}22`,
-      borderLeft: `3px solid ${isError ? 'var(--error)' : 'var(--warning)'}`,
       borderRadius: 8, padding: '12px 16px',
     }}>
       <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>

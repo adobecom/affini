@@ -209,9 +209,6 @@ export default function FlowsView() {
                 padding: '8px 14px',
                 cursor: 'pointer',
                 background: selectedId === s.id ? 'rgba(99,102,241,0.12)' : 'transparent',
-                borderLeft: selectedId === s.id
-                  ? '2px solid var(--accent)'
-                  : '2px solid transparent',
                 transition: 'background 0.1s',
               }}
             >
@@ -364,7 +361,6 @@ export default function FlowsView() {
       {/* ── Right panel: contract + AI summary ───────────────────────────── */}
       <div style={{
         width: 300, flexShrink: 0,
-        borderLeft: '1px solid var(--border)',
         overflow: 'hidden',
         display: 'flex', flexDirection: 'column',
       }}>

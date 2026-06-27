@@ -18,7 +18,6 @@ function FragilityCard({ flag }: { flag: FragilityFlag }) {
   return (
     <div style={{
       border: `1px solid ${color}`,
-      borderLeft: `3px solid ${color}`,
       borderRadius: 6,
       padding: '7px 10px',
       marginBottom: 6,
