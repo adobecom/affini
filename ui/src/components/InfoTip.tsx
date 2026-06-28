@@ -26,6 +26,7 @@ interface Coords {
   left: number        // center of popover in viewport coords (after clamping)
   arrowOffset: number // how far arrow center is from popover center (px)
   flipped: boolean    // true → opens downward
+  maxHeight: number   // available vertical space in the chosen direction
 }
 
 export function InfoTip({ title, formula, children }: InfoTipProps) {
@@ -56,7 +57,12 @@ export function InfoTip({ title, formula, children }: InfoTipProps) {
     // Vertical anchor: open upward from the top of the button, or downward from the bottom.
     const top = flipped ? rect.bottom + 6 : rect.top - 6
 
-    setCoords({ top, left, arrowOffset, flipped })
+    // Cap popover height to the available space in the chosen direction.
+    const maxHeight = flipped
+      ? window.innerHeight - top - MARGIN
+      : top - MARGIN
+
+    setCoords({ top, left, arrowOffset, flipped, maxHeight: Math.max(maxHeight, 80) })
   }, [])
 
   function handleToggle(e: React.MouseEvent) {
@@ -145,6 +151,8 @@ export function InfoTip({ title, formula, children }: InfoTipProps) {
             flexDirection:'column',
             gap:           6,
             pointerEvents:'all',
+            maxHeight:     coords.maxHeight,
+            overflowY:    'auto',
           }}
           onClick={e => e.stopPropagation()}
         >
