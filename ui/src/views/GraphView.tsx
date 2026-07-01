@@ -475,7 +475,6 @@ function DetailPanel({
     <div style={{
       position: 'absolute', top: 12, right: 12, zIndex: 10,
       background: 'var(--surface)', border: '1px solid var(--border)',
-      borderLeft: `3px solid ${lc}`,
       borderRadius: 8, padding: '12px 14px',
       width: 270, maxHeight: 'calc(100vh - 120px)',
       overflowY: 'auto', fontSize: 12,
@@ -521,7 +520,7 @@ function DetailPanel({
           {violations.map((v, i) => (
             <div key={i} style={{
               background: 'rgba(248,113,113,0.08)', border: '1px solid rgba(248,113,113,0.3)',
-              borderLeft: '3px solid var(--error)', borderRadius: 5, padding: '5px 8px',
+              borderRadius: 5, padding: '5px 8px',
               marginBottom: 5, fontSize: 11,
             }}>
               <div style={{ color: 'var(--error)', fontWeight: 600, marginBottom: 3 }}>{v.message}</div>

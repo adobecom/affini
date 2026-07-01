@@ -90,7 +90,6 @@ export function ModuleNode({ data }: { data: ModuleNodeData }) {
       style={{
         background: bg,
         border: `1px ${borderStyle} ${borderColor}`,
-        borderLeft: `3px ${borderStyle} ${lc}`,
         borderRadius: 7,
         padding: '5px 9px 6px',
         width,

@@ -12,6 +12,7 @@ const ARROW = 8
  * @param tx  target center X
  * @param ty  target center Y
  * @param tw  target node width
+ * @param th  target node height (defaults to NODE_H = 62; pass NODE_H_FLOW = 44 for flow nodes)
  */
 export function edgePath(
   sx: number,
@@ -19,12 +20,13 @@ export function edgePath(
   tx: number,
   ty: number,
   tw: number,
+  th: number = NODE_H,
 ): string {
   const dx = tx - sx, dy = ty - sy
   const len = Math.sqrt(dx * dx + dy * dy) || 1
   const ux = dx / len, uy = dy / len
   const hw = tw / 2 + ARROW + 3
-  const hh = NODE_H / 2 + ARROW + 3
+  const hh = th / 2 + ARROW + 3
   const tBorder = Math.min(
     Math.abs(ux) > 1e-9 ? hw / Math.abs(ux) : Infinity,
     Math.abs(uy) > 1e-9 ? hh / Math.abs(uy) : Infinity,

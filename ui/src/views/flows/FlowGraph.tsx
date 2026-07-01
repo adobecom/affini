@@ -79,7 +79,7 @@ export function FlowGraph({ flow, stepIndex, playing, stepDurationMs, onStepSele
 
     if (!edge.isSelfLoop) {
       pathEl = document.createElementNS('http://www.w3.org/2000/svg', 'path')
-      pathEl.setAttribute('d', edgePath(fromNode.x, fromNode.y, toNode.x, toNode.y, NODE_W))
+      pathEl.setAttribute('d', edgePath(fromNode.x, fromNode.y, toNode.x, toNode.y, NODE_W, NODE_H_FLOW))
       document.body.appendChild(pathEl) // needed for getTotalLength
       totalLen = pathEl.getTotalLength() || 1
     }
@@ -217,7 +217,7 @@ export function FlowGraph({ flow, stepIndex, playing, stepDurationMs, onStepSele
 
           const d = e.isSelfLoop
             ? selfLoopPath(fn.x, fn.y)
-            : edgePath(fn.x, fn.y, tn.x, tn.y, NODE_W)
+            : edgePath(fn.x, fn.y, tn.x, tn.y, NODE_W, NODE_H_FLOW)
 
           return (
             <path
@@ -242,7 +242,7 @@ export function FlowGraph({ flow, stepIndex, playing, stepDurationMs, onStepSele
           if (!fn || !tn) return null
           const d = activeEdge.isSelfLoop
             ? selfLoopPath(fn.x, fn.y)
-            : edgePath(fn.x, fn.y, tn.x, tn.y, NODE_W)
+            : edgePath(fn.x, fn.y, tn.x, tn.y, NODE_W, NODE_H_FLOW)
           return (
             <path
               d={d}
@@ -272,21 +272,11 @@ export function FlowGraph({ flow, stepIndex, playing, stepDurationMs, onStepSele
                 if (idx !== -1) onStepSelect(idx)
               }}
             >
-              {/* module-color stripe (left border) */}
+              {/* node body */}
               <rect
                 x={n.x - NODE_W / 2}
                 y={n.y - NODE_H_FLOW / 2}
-                width={4}
-                height={NODE_H_FLOW}
-                rx={3}
-                fill={`hsl(${hue},60%,55%)`}
-                opacity={isActive ? 1 : 0.45}
-              />
-              {/* node body */}
-              <rect
-                x={n.x - NODE_W / 2 + 4}
-                y={n.y - NODE_H_FLOW / 2}
-                width={NODE_W - 4}
+                width={NODE_W}
                 height={NODE_H_FLOW}
                 rx={6}
                 fill={isActive ? 'rgba(99,102,241,0.12)' : 'var(--surface, #1a1a2e)'}
@@ -297,7 +287,7 @@ export function FlowGraph({ flow, stepIndex, playing, stepDurationMs, onStepSele
               />
               {/* function label */}
               <text
-                x={n.x + 6}
+                x={n.x}
                 y={n.y - 4}
                 fontSize={11}
                 fontFamily="var(--mono, monospace)"
@@ -310,7 +300,7 @@ export function FlowGraph({ flow, stepIndex, playing, stepDurationMs, onStepSele
               </text>
               {/* module path hint */}
               <text
-                x={n.x + 6}
+                x={n.x}
                 y={n.y + 10}
                 fontSize={9}
                 fontFamily="var(--mono, monospace)"
