@@ -1,31 +1,35 @@
 /**
- * Deterministic layered layout for the FlowGraph.
- * Nodes = functions (keyed module|name|order), column = call depth.
- * No force sim — positions are stable so the animated dot travels predictably.
+ * Tree layout for the FlowGraph using dagre LR (left-to-right by call depth).
+ *
+ * Key design decisions vs the old column-by-depth layout:
+ *  1. Nodes are keyed by **step id** (not FunctionId), so a function called in two
+ *     different branches appears as two separate nodes — the tree never collapses.
+ *  2. The entry function is a special "entry" root node with no incoming edge.
+ *  3. Parent-link data (step.parent) builds the tree structure; dagre handles spacing.
+ *  4. isSelfLoop is taken from step.recursion (not from key equality).
  */
-
+import { graphlib, layout } from '@dagrejs/dagre'
 import type { Flow, FunctionId } from '../../api'
 
 // ── layout constants ──────────────────────────────────────────────────────────
 
-export const COL_W  = 200   // horizontal gap between depth columns
-export const ROW_H  = 90    // vertical gap between siblings in a column
-export const NODE_W = 148   // node rectangle width
-export const NODE_H_FLOW = 44 // node rectangle height (shorter than ForceGraph's 62)
-export const PAD    = 48    // canvas padding on all sides
+export const NODE_W      = 152   // node rectangle width
+export const NODE_H_FLOW = 46    // node rectangle height
+export const PAD         = 48    // canvas padding
 
 // ── types ─────────────────────────────────────────────────────────────────────
 
 export interface FlowNode {
   key: string
-  label: string    // function name shown in the node
-  module: number   // used for hue assignment
-  depth: number    // column index
-  x: number        // center X
-  y: number        // center Y
+  label: string     // function name
+  module: number    // used for hue assignment
+  x: number         // center X
+  y: number         // center Y
+  stepId: number | null  // null for the entry root node
 }
 
 export interface FlowGraphEdge {
+  /** Index into flow.steps (for `stepIndex` matching during playback). */
   stepIndex: number
   fromKey: string
   toKey: string
@@ -41,92 +45,131 @@ export interface FlowLayout {
 
 // ── helpers ───────────────────────────────────────────────────────────────────
 
-export function nodeKey(fid: FunctionId): string {
-  return `${fid.module}|${fid.name}|${fid.order}`
+/** Key for a step node: "step_{id}" */
+export function stepNodeKey(stepId: number): string {
+  return `step_${stepId}`
 }
 
+/** The entry root always uses this key. */
+export const ENTRY_KEY = 'entry'
+
 /**
- * Map a module id to a CSS hue (0-360) so each module gets a stable accent color.
- * Simple multiplicative hash — no collision guarantees needed, just visual variety.
+ * Map a module id to a CSS hue (0-360) for a stable accent color.
+ * Simple multiplicative hash — good enough for visual variety.
  */
 export function moduleHue(moduleId: number): number {
   return (moduleId * 137.508) % 360
 }
 
+/**
+ * @deprecated Use stepNodeKey() — kept only for backward compat with old consumers.
+ */
+export function nodeKey(fid: FunctionId): string {
+  return `${fid.module}|${fid.name}|${fid.order}`
+}
+
 // ── layout engine ─────────────────────────────────────────────────────────────
 
 export function computeFlowLayout(flow: Flow): FlowLayout {
-  const { steps } = flow
+  const { steps, entry } = flow
 
   if (steps.length === 0) {
-    return { nodes: new Map(), edges: [], width: PAD * 2 + NODE_W, height: PAD * 2 + NODE_H_FLOW }
-  }
-
-  // --- 1. Build ordered node list (first-appearance wins key/depth assignment)
-  const nodeOrder: Array<{ key: string; fid: FunctionId; depth: number }> = []
-  const seen = new Set<string>()
-
-  function ensureNode(fid: FunctionId, depth: number) {
-    const k = nodeKey(fid)
-    if (!seen.has(k)) {
-      seen.add(k)
-      nodeOrder.push({ key: k, fid, depth: Math.max(0, depth) })
+    return {
+      nodes: new Map(),
+      edges: [],
+      width:  PAD * 2 + NODE_W,
+      height: PAD * 2 + NODE_H_FLOW,
     }
   }
 
+  // ── 1. Build dagre graph ────────────────────────────────────────────────────
+  const g = new graphlib.Graph()
+  g.setDefaultEdgeLabel(() => ({}))
+  g.setGraph({
+    rankdir: 'LR',
+    ranksep: 80,
+    nodesep: 44,
+    marginx: PAD,
+    marginy: PAD,
+  })
+
+  // Root node: the entry function
+  g.setNode(ENTRY_KEY, { width: NODE_W, height: NODE_H_FLOW, label: entry.name })
+
+  // One node per step (keyed by step id)
   for (const step of steps) {
-    ensureNode(step.from, step.depth)
-    ensureNode(step.to,   step.depth + 1)
+    g.setNode(stepNodeKey(step.id), { width: NODE_W, height: NODE_H_FLOW, label: step.to.name })
   }
 
-  // --- 2. Assign row-within-column (first-appearance order)
-  const colRows = new Map<number, string[]>() // depth → [key...]
-  for (const { key, depth } of nodeOrder) {
-    if (!colRows.has(depth)) colRows.set(depth, [])
-    colRows.get(depth)!.push(key)
+  // Tree edges (skip self-loops — dagre can't handle them)
+  for (const step of steps) {
+    if (step.recursion) continue
+    const fromKey = step.parent === null ? ENTRY_KEY : stepNodeKey(step.parent)
+    const toKey   = stepNodeKey(step.id)
+    g.setEdge(fromKey, toKey)
   }
 
-  const maxCol  = Math.max(...colRows.keys())
-  const maxRows = Math.max(...[...colRows.values()].map(r => r.length))
+  layout(g)
 
-  // --- 3. Compute coordinates
+  // ── 2. Extract node positions ───────────────────────────────────────────────
   const nodes = new Map<string, FlowNode>()
-  for (const { key, fid, depth } of nodeOrder) {
-    const col       = colRows.get(depth)!
-    const rowInCol  = col.indexOf(key)
-    const colCount  = col.length
 
-    const x = PAD + depth * COL_W + NODE_W / 2
-    // Center this column's nodes vertically against the tallest column
-    const totalColH  = colCount  * ROW_H - (ROW_H - NODE_H_FLOW)
-    const totalMaxH  = maxRows   * ROW_H - (ROW_H - NODE_H_FLOW)
-    const topOffset  = (totalMaxH - totalColH) / 2
-    const y = PAD + topOffset + rowInCol * ROW_H + NODE_H_FLOW / 2
-
-    nodes.set(key, {
-      key,
-      label: fid.name,
-      module: fid.module,
-      depth,
-      x,
-      y,
+  const entryPos = g.node(ENTRY_KEY) as { x: number; y: number } | undefined
+  if (entryPos) {
+    nodes.set(ENTRY_KEY, {
+      key:    ENTRY_KEY,
+      label:  entry.name,
+      module: entry.module,
+      x:      entryPos.x,
+      y:      entryPos.y,
+      stepId: null,
     })
   }
 
-  // --- 4. Build edges (one per step)
+  for (const step of steps) {
+    const k   = stepNodeKey(step.id)
+    const pos = g.node(k) as { x: number; y: number } | undefined
+    // Self-loops: place next to their parent if dagre didn't give them a position
+    if (!pos) {
+      const parentKey = step.parent === null ? ENTRY_KEY : stepNodeKey(step.parent)
+      const parentPos = nodes.get(parentKey)
+      nodes.set(k, {
+        key:    k,
+        label:  step.to.name,
+        module: step.to.module,
+        x:      parentPos ? parentPos.x + NODE_W + 40 : PAD + NODE_W / 2,
+        y:      parentPos ? parentPos.y : PAD + NODE_H_FLOW / 2,
+        stepId: step.id,
+      })
+    } else {
+      nodes.set(k, {
+        key:    k,
+        label:  step.to.name,
+        module: step.to.module,
+        x:      pos.x,
+        y:      pos.y,
+        stepId: step.id,
+      })
+    }
+  }
+
+  // ── 3. Build edge list (one per step, preserving stepIndex for playback) ────
   const edges: FlowGraphEdge[] = steps.map((step, i) => {
-    const fromKey = nodeKey(step.from)
-    const toKey   = nodeKey(step.to)
+    const fromKey = step.parent === null ? ENTRY_KEY : stepNodeKey(step.parent)
+    const toKey   = stepNodeKey(step.id)
     return {
       stepIndex: i,
       fromKey,
       toKey,
-      isSelfLoop: fromKey === toKey,
+      isSelfLoop: step.recursion,
     }
   })
 
-  const width  = PAD * 2 + (maxCol + 1) * COL_W
-  const height = PAD * 2 + maxRows * ROW_H
-
-  return { nodes, edges, width, height }
+  const ginfo = g.graph() as { width?: number; height?: number }
+  return {
+    nodes,
+    edges,
+    width:  (ginfo.width  ?? 800) + PAD * 2,
+    height: (ginfo.height ?? 400) + PAD * 2,
+  }
 }

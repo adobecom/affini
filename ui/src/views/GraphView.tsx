@@ -1,6 +1,13 @@
 /**
  * Module Graph — architect's view of the dependency structure.
  *
+ * Five view modes (segmented selector):
+ *   Files       — per-file force layout (original)
+ *   Directories — directory rollup, ranked dagre layout
+ *   Layers      — boundary/layer rollup, ranked
+ *   Cycles      — SCC cluster rollup, ranked
+ *   Call graph  — function-level call graph, ranked
+ *
  * Signals visualised:
  *  - Layer membership & illegal cross-layer edges (from affini.toml intent)
  *  - Dependency cycles (Tarjan SCC, computed server-side)
@@ -9,10 +16,6 @@
  *  - Orphan / unreachable files
  *  - Near-duplicate code clusters
  *  - Change since baseline (added / removed modules)
- *
- * Layout: D3 force simulation with layer-band Y bias.
- * Stable (core) layer sits at the bottom; unstable (ui) at the top.
- * Healthy imports flow downward; violations and upward edges are visually jarring.
  */
 import { useCallback, useEffect, useMemo, useState } from 'react'
 import {
@@ -20,9 +23,12 @@ import {
   ChevronDown, ChevronRight,
 } from 'lucide-react'
 import {
-  fetchModel, fetchViolations, fetchDupes, fetchDiff,
+  fetchModel, fetchViolations, fetchDupes, fetchDiff, fetchGroupedGraph, fetchCallGraph,
   type Module, type ModuleMetrics, type Violation,
   type DupesReport, type ModelDiff, type Model,
+  type GroupedGraph, type GroupNode, type GroupEdge,
+  type CallGraphReport,
+  type GroupBy,
 } from '../api'
 import { ForceGraph, type FGNode, type FGEdge } from './graph/ForceGraph'
 import { buildLayerColors, layerColor } from './graph/layers'
@@ -30,12 +36,26 @@ import { type ModuleSignals } from './graph/ModuleNode'
 import { InfoTip } from '../components/InfoTip'
 import { METRIC_HELP } from '../metricHelp'
 
-// ─── derived signal computation ──────────────────────────────────────────────
+// ─── graph mode ──────────────────────────────────────────────────────────────
+
+type GraphMode = 'files' | 'directory' | 'layer' | 'scc' | 'callgraph'
+
+const MODE_LABELS: { id: GraphMode; label: string; title: string }[] = [
+  { id: 'files',     label: 'Files',       title: 'Per-file dependency graph (force layout)' },
+  { id: 'directory', label: 'Directories', title: 'Directory-level rollup (ranked)' },
+  { id: 'layer',     label: 'Layers',      title: 'Architectural layer groups (ranked)' },
+  { id: 'scc',       label: 'Cycles',      title: 'Dependency cycle / SCC clusters (ranked)' },
+  { id: 'callgraph', label: 'Call graph',  title: 'Function-level call graph (ranked)' },
+]
+
+// ─── default signals (null object) ───────────────────────────────────────────
 
 const DEFAULT_SIGNALS: ModuleSignals = {
   instability: 0, isHub: false, isOrphan: false, isCycle: false,
   isViolationSrc: false, isDupe: false, changeStatus: null, loc: 0, layer: undefined,
 }
+
+// ─── per-file signal computation ─────────────────────────────────────────────
 
 function computeSignals(
   model: Model,
@@ -107,22 +127,147 @@ function nodeWidth(loc: number): number {
   return Math.round(Math.max(148, Math.min(224, 148 + (loc / 400) * 76)))
 }
 
+// ─── GroupNode / CallGraphNode → FGNode adapters ─────────────────────────────
+
+function groupNodesToFG(
+  gnodes: GroupNode[],
+  gedges: GroupEdge[],
+  selectedId: number | null,
+): FGNode[] {
+  // Build adjacency for neighbourhood highlight
+  const out = new Map<number, number[]>()
+  const ins  = new Map<number, number[]>()
+  for (const e of gedges) {
+    if (!out.has(e.from)) out.set(e.from, [])
+    if (!ins.has(e.to))   ins.set(e.to, [])
+    out.get(e.from)!.push(e.to)
+    ins.get(e.to)!.push(e.from)
+  }
+  const hood: Set<number> | null = selectedId !== null
+    ? new Set([selectedId, ...(out.get(selectedId) ?? []), ...(ins.get(selectedId) ?? [])])
+    : null
+
+  return gnodes.map(gn => ({
+    id: gn.id,
+    path: gn.label,
+    width: nodeWidth(gn.loc),
+    layer: gn.key,
+    signals: {
+      instability: 0,
+      isHub: false,
+      isOrphan: gedges.every(e => e.from !== gn.id && e.to !== gn.id),
+      isCycle: gn.is_cluster,
+      isViolationSrc: gedges.some(e => (e.from === gn.id || e.to === gn.id) && e.violation),
+      isDupe: false,
+      changeStatus: null,
+      loc: gn.loc,
+      layer: gn.key,
+    } satisfies ModuleSignals,
+    metrics: {
+      fan_in:   gedges.filter(e => e.to   === gn.id).reduce((s, e) => s + e.weight, 0),
+      fan_out:  gedges.filter(e => e.from === gn.id).reduce((s, e) => s + e.weight, 0),
+      coupling: 0,
+      loc: gn.loc,
+    } satisfies ModuleMetrics,
+    isSelected: gn.id === selectedId,
+    isDimmed: hood !== null && !hood.has(gn.id),
+  }))
+}
+
+function groupEdgesToFG(gedges: GroupEdge[]): FGEdge[] {
+  return gedges.map((e, i) => ({
+    id: `ge${i}`,
+    fromId: e.from,
+    toId: e.to,
+    color: e.violation ? '#f87171' : e.cross_layer_up ? '#fbbf24' : '#4338ca',
+    strokeWidth: e.violation ? 2.5 : 1.5,
+    dashed: e.cross_layer_up && !e.violation,
+    dimmed: false,
+  }))
+}
+
+/** Map a FunctionId to a stable numeric id for FGNode. */
+function fidToId(fid: { module: number; order: number }): number {
+  return fid.module * 10000 + fid.order
+}
+
+function callgraphToFG(
+  report: CallGraphReport,
+  selectedId: number | null,
+): { nodes: FGNode[]; edges: FGEdge[] } {
+  const out = new Map<number, number[]>()
+  const ins  = new Map<number, number[]>()
+  for (const e of report.edges) {
+    const fk = fidToId(e.from)
+    const tk = fidToId(e.to)
+    if (!out.has(fk)) out.set(fk, [])
+    if (!ins.has(tk)) ins.set(tk, [])
+    out.get(fk)!.push(tk)
+    ins.get(tk)!.push(fk)
+  }
+  const hood: Set<number> | null = selectedId !== null
+    ? new Set([selectedId, ...(out.get(selectedId) ?? []), ...(ins.get(selectedId) ?? [])])
+    : null
+
+  const fgNodes: FGNode[] = report.nodes.map(n => {
+    const nk = fidToId(n.id)
+    return {
+      id: nk,
+      path: `${n.module_path}#${n.label}`,
+      width: 160,
+      signals: { ...DEFAULT_SIGNALS, layer: undefined },
+      metrics: {
+        fan_in:  ins.get(nk)?.length ?? 0,
+        fan_out: out.get(nk)?.length ?? 0,
+        coupling: 0,
+      },
+      isSelected: nk === selectedId,
+      isDimmed: hood !== null && !hood.has(nk),
+    }
+  })
+
+  const fgEdges: FGEdge[] = report.edges.map((e, i) => {
+    const fk = fidToId(e.from)
+    const tk = fidToId(e.to)
+    return {
+      id: `cge${i}`,
+      fromId: fk,
+      toId: tk,
+      color: e.branchy ? '#fbbf24' : '#4338ca',
+      strokeWidth: 1.5,
+      dashed: e.branchy,
+      dimmed: false,
+    }
+  })
+
+  return { nodes: fgNodes, edges: fgEdges }
+}
+
 // ─── main component ───────────────────────────────────────────────────────────
 
 export default function GraphView() {
+  const [graphMode, setGraphMode] = useState<GraphMode>('files')
+
+  // Files-mode data
   const [model, setModel]           = useState<Model | null>(null)
   const [violations, setViolations] = useState<Violation[]>([])
   const [dupes, setDupes]           = useState<DupesReport | null>(null)
   const [diff, setDiff]             = useState<ModelDiff | null>(null)
-  const [loading, setLoading]       = useState(true)
-  const [error, setError]           = useState<string | null>(null)
+
+  // Grouped / callgraph data
+  const [groupedGraph, setGroupedGraph]     = useState<GroupedGraph | null>(null)
+  const [callgraphReport, setCallgraph]     = useState<CallGraphReport | null>(null)
+  const [groupedLoading, setGroupedLoading] = useState(false)
+
+  const [loading, setLoading] = useState(true)
+  const [error, setError]     = useState<string | null>(null)
 
   const [selectedId, setSelectedId] = useState<number | null>(null)
   const [filter, setFilter]         = useState<FilterState>(DEFAULT_FILTER)
   const [focusId, setFocusId]       = useState<number | null>(null)
   const [legendOpen, setLegendOpen] = useState(false)
 
-  // ── fetch all data in parallel ────────────────────────────────────────────
+  // ── fetch base data (files mode) ──────────────────────────────────────────
   useEffect(() => {
     Promise.all([
       fetchModel(),
@@ -135,7 +280,29 @@ export default function GraphView() {
       .finally(() => setLoading(false))
   }, [])
 
-  // ── derived data ──────────────────────────────────────────────────────────
+  // ── fetch grouped/callgraph data on mode switch ───────────────────────────
+  useEffect(() => {
+    if (graphMode === 'files') return
+    setGroupedLoading(true)
+    setSelectedId(null)
+
+    if (graphMode === 'callgraph') {
+      setCallgraph(null)
+      fetchCallGraph()
+        .then(setCallgraph)
+        .catch(e => setError(e.message))
+        .finally(() => setGroupedLoading(false))
+    } else {
+      setGroupedGraph(null)
+      const by: GroupBy = graphMode as GroupBy
+      fetchGroupedGraph(by)
+        .then(setGroupedGraph)
+        .catch(e => setError(e.message))
+        .finally(() => setGroupedLoading(false))
+    }
+  }, [graphMode])
+
+  // ── derived data (files mode) ─────────────────────────────────────────────
   const signalsMap = useMemo(
     () => model ? computeSignals(model, violations, dupes, diff) : {},
     [model, violations, dupes, diff],
@@ -147,22 +314,19 @@ export default function GraphView() {
   )
 
   const layerOrder = model?.layer_order ?? []
-
-  // Color map keyed by layer name, derived from declared order (not hardcoded names).
   const layerColors = useMemo(() => buildLayerColors(layerOrder), [layerOrder])
 
-  // ── selection neighbourhood ───────────────────────────────────────────────
   const neighborhood = useMemo<Set<number> | null>(() => {
-    if (selectedId === null || !model) return null
+    if (selectedId === null || !model || graphMode !== 'files') return null
     const hood = new Set<number>([selectedId])
     for (const n of adjacency.out.get(selectedId) ?? []) hood.add(n)
     for (const n of adjacency.ins.get(selectedId) ?? []) hood.add(n)
     return hood
-  }, [selectedId, adjacency, model])
+  }, [selectedId, adjacency, model, graphMode])
 
-  // ── visible modules after focus + filter ─────────────────────────────────
+  // ── visible modules (files mode) ─────────────────────────────────────────
   const visibleModules = useMemo(() => {
-    if (!model) return []
+    if (!model || graphMode !== 'files') return []
     let mods = model.modules
 
     if (focusId !== null) {
@@ -181,16 +345,18 @@ export default function GraphView() {
     if (changedOnly)    mods = mods.filter(m => !!signalsMap[m.id]?.changeStatus)
 
     return mods
-  }, [model, signalsMap, adjacency, focusId, filter])
+  }, [model, signalsMap, adjacency, focusId, filter, graphMode])
 
-  // ── build FGNode / FGEdge arrays for ForceGraph ───────────────────────────
+  // ── FGNode / FGEdge arrays ────────────────────────────────────────────────
+
   const violEdgeKeys = useMemo(
     () => new Set(violations.map(v => `${v.from_path}|${v.to_path}`)),
     [violations],
   )
 
-  const fgNodes = useMemo<FGNode[]>(() => {
-    if (!model) return []
+  // Files mode
+  const filesFgNodes = useMemo<FGNode[]>(() => {
+    if (!model || graphMode !== 'files') return []
     return visibleModules.map(m => {
       const metrics  = model.metrics[m.id] ?? { fan_in: 0, fan_out: 0, coupling: 0 }
       const signals  = signalsMap[m.id] ?? DEFAULT_SIGNALS
@@ -205,10 +371,10 @@ export default function GraphView() {
         isDimmed:   neighborhood !== null && !neighborhood.has(m.id),
       }
     })
-  }, [model, visibleModules, signalsMap, selectedId, neighborhood])
+  }, [model, visibleModules, signalsMap, selectedId, neighborhood, graphMode])
 
-  const fgEdges = useMemo<FGEdge[]>(() => {
-    if (!model) return []
+  const filesFgEdges = useMemo<FGEdge[]>(() => {
+    if (!model || graphMode !== 'files') return []
     const visibleIds = new Set(visibleModules.map(m => m.id))
     return model.edges
       .filter(e => visibleIds.has(e.from) && visibleIds.has(e.to))
@@ -227,7 +393,7 @@ export default function GraphView() {
           (neighborhood.has(e.from) && neighborhood.has(e.to))
 
         let color = e.kind === 'Reexports' ? '#fbbf24' : '#4338ca'
-        if (isViol)       color = '#f87171'
+        if (isViol)           color = '#f87171'
         else if (isCycleEdge) color = '#ef4444'
 
         return {
@@ -240,7 +406,35 @@ export default function GraphView() {
           dimmed:      !isActive,
         }
       })
-  }, [model, visibleModules, violEdgeKeys, neighborhood])
+  }, [model, visibleModules, violEdgeKeys, neighborhood, graphMode])
+
+  // Grouped modes
+  const groupFgNodes = useMemo<FGNode[]>(() => {
+    if (!groupedGraph || graphMode === 'files' || graphMode === 'callgraph') return []
+    return groupNodesToFG(groupedGraph.nodes, groupedGraph.edges, selectedId)
+  }, [groupedGraph, selectedId, graphMode])
+
+  const groupFgEdges = useMemo<FGEdge[]>(() => {
+    if (!groupedGraph || graphMode === 'files' || graphMode === 'callgraph') return []
+    return groupEdgesToFG(groupedGraph.edges)
+  }, [groupedGraph, graphMode])
+
+  // Callgraph mode
+  const cgFg = useMemo(() => {
+    if (!callgraphReport || graphMode !== 'callgraph') return { nodes: [], edges: [] }
+    return callgraphToFG(callgraphReport, selectedId)
+  }, [callgraphReport, selectedId, graphMode])
+
+  // Active FGNodes/FGEdges depending on mode
+  const fgNodes = graphMode === 'files' ? filesFgNodes
+    : graphMode === 'callgraph' ? cgFg.nodes
+    : groupFgNodes
+
+  const fgEdges = graphMode === 'files' ? filesFgEdges
+    : graphMode === 'callgraph' ? cgFg.edges
+    : groupFgEdges
+
+  const isRanked = graphMode !== 'files'
 
   // ── selection handlers ────────────────────────────────────────────────────
   const handleNodeClick = useCallback((id: number) => {
@@ -248,11 +442,10 @@ export default function GraphView() {
   }, [])
 
   const handlePaneClick = useCallback(() => setSelectedId(null), [])
-
   const exitFocus = useCallback(() => { setFocusId(null); setSelectedId(null) }, [])
 
-  // ── selected module details ───────────────────────────────────────────────
-  const selectedModule   = selectedId !== null ? (model?.modules.find(m => m.id === selectedId) ?? null) : null
+  // ── selected module details (files mode only) ─────────────────────────────
+  const selectedModule   = graphMode === 'files' && selectedId !== null ? (model?.modules.find(m => m.id === selectedId) ?? null) : null
   const selectedMetrics  = selectedId !== null ? (model?.metrics[selectedId] ?? null) : null
   const selectedSignals  = selectedId !== null ? (signalsMap[selectedId] ?? null) : null
   const selectedViolations = violations.filter(
@@ -278,66 +471,132 @@ export default function GraphView() {
   // ─────────────────────────────────────────────────────────────────────────
   return (
     <div style={{ height: '100%', position: 'relative', overflow: 'hidden' }}>
+
+      {/* ── mode selector (top-center) ─────────────────────────────────── */}
+      <div style={{
+        position: 'absolute', top: 10, left: '50%', transform: 'translateX(-50%)',
+        zIndex: 15, display: 'flex', gap: 2,
+        background: 'var(--surface)', border: '1px solid var(--border)',
+        borderRadius: 8, padding: 3,
+      }}>
+        {MODE_LABELS.map(m => (
+          <button
+            key={m.id}
+            title={m.title}
+            onClick={() => setGraphMode(m.id)}
+            style={{
+              padding: '4px 10px', borderRadius: 6, fontSize: 11,
+              background: graphMode === m.id ? 'var(--accent)' : 'transparent',
+              border: 'none',
+              color: graphMode === m.id ? '#fff' : 'var(--text-muted)',
+              cursor: 'pointer', fontFamily: 'inherit',
+            }}
+          >
+            {m.label}
+          </button>
+        ))}
+      </div>
+
+      {/* Loading overlay for grouped fetch */}
+      {groupedLoading && (
+        <div style={{
+          position: 'absolute', inset: 0, zIndex: 5,
+          display: 'flex', alignItems: 'center', justifyContent: 'center',
+          background: 'rgba(0,0,0,0.3)',
+          color: 'var(--text-muted)', fontSize: 13,
+        }}>
+          <Loader size={16} style={{ animation: 'spin 1s linear infinite', marginRight: 8 }} />
+          building {graphMode} view…
+          <style>{`@keyframes spin { to { transform: rotate(360deg); } }`}</style>
+        </div>
+      )}
+
       <ForceGraph
         nodes={fgNodes}
         edges={fgEdges}
         layerOrder={layerOrder}
         onNodeClick={handleNodeClick}
         onPaneClick={handlePaneClick}
+        layoutMode={isRanked ? 'ranked' : 'force'}
       />
 
-      {/* ── search + filter bar (top-left) ─────────────────────────────── */}
-      <div style={{
-        position: 'absolute', top: 12, left: 12, zIndex: 10,
-        display: 'flex', flexDirection: 'column', gap: 6,
-        pointerEvents: 'all',
-      }}>
-        <input
-          value={filter.search}
-          onChange={e => setFilter(f => ({ ...f, search: e.target.value }))}
-          placeholder="Search files…"
-          style={{
-            background: 'var(--surface)', border: '1px solid var(--border)',
-            borderRadius: 6, padding: '5px 10px', fontSize: 12,
-            color: 'var(--text)', width: 200, outline: 'none',
-          }}
-        />
-        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
-          {([
-            ['cyclesOnly',     '↻ Cycles'],
-            ['violationsOnly', '⚠ Violations'],
-            ['hubsOnly',       '★ Hubs'],
-            ['orphansOnly',    '◌ Orphans'],
-            ['changedOnly',    '△ Changed'],
-          ] as [keyof FilterState, string][]).map(([key, label]) => (
-            <FilterPill
-              key={key}
-              label={label}
-              active={filter[key] as boolean}
-              onClick={() => setFilter(f => ({ ...f, [key]: !f[key] }))}
-            />
-          ))}
-          {Object.values(filter).some(Boolean) && (
-            <FilterPill label="✕ Clear" active={false} onClick={() => setFilter(DEFAULT_FILTER)} muted />
+      {/* ── search + filter bar (files mode only, top-left) ────────────── */}
+      {graphMode === 'files' && (
+        <div style={{
+          position: 'absolute', top: 12, left: 12, zIndex: 10,
+          display: 'flex', flexDirection: 'column', gap: 6,
+          pointerEvents: 'all',
+        }}>
+          <input
+            value={filter.search}
+            onChange={e => setFilter(f => ({ ...f, search: e.target.value }))}
+            placeholder="Search files…"
+            style={{
+              background: 'var(--surface)', border: '1px solid var(--border)',
+              borderRadius: 6, padding: '5px 10px', fontSize: 12,
+              color: 'var(--text)', width: 200, outline: 'none',
+            }}
+          />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 5 }}>
+            {([
+              ['cyclesOnly',     '↻ Cycles'],
+              ['violationsOnly', '⚠ Violations'],
+              ['hubsOnly',       '★ Hubs'],
+              ['orphansOnly',    '◌ Orphans'],
+              ['changedOnly',    '△ Changed'],
+            ] as [keyof FilterState, string][]).map(([key, label]) => (
+              <FilterPill
+                key={key}
+                label={label}
+                active={filter[key] as boolean}
+                onClick={() => setFilter(f => ({ ...f, [key]: !f[key] }))}
+              />
+            ))}
+            {Object.values(filter).some(Boolean) && (
+              <FilterPill label="✕ Clear" active={false} onClick={() => setFilter(DEFAULT_FILTER)} muted />
+            )}
+          </div>
+          {focusId !== null && (
+            <button
+              onClick={exitFocus}
+              style={{
+                background: 'var(--surface)', border: '1px solid var(--warning)',
+                borderRadius: 6, padding: '4px 10px', fontSize: 11,
+                color: 'var(--warning)', cursor: 'pointer',
+                display: 'flex', alignItems: 'center', gap: 5,
+              }}
+            >
+              <RotateCcw size={11} /> Exit focus
+            </button>
           )}
         </div>
-        {focusId !== null && (
-          <button
-            onClick={exitFocus}
-            style={{
-              background: 'var(--surface)', border: '1px solid var(--warning)',
-              borderRadius: 6, padding: '4px 10px', fontSize: 11,
-              color: 'var(--warning)', cursor: 'pointer',
-              display: 'flex', alignItems: 'center', gap: 5,
-            }}
-          >
-            <RotateCcw size={11} /> Exit focus
-          </button>
-        )}
-      </div>
+      )}
+
+      {/* ── grouped mode info (top-left) ───────────────────────────────── */}
+      {graphMode !== 'files' && groupedGraph && (
+        <div style={{
+          position: 'absolute', top: 52, left: 12, zIndex: 10,
+          background: 'var(--surface)', border: '1px solid var(--border)',
+          borderRadius: 6, padding: '5px 10px', fontSize: 11,
+          color: 'var(--text-muted)',
+        }}>
+          {groupedGraph.nodes.length} groups · {groupedGraph.edges.length} edges
+        </div>
+      )}
+      {graphMode === 'callgraph' && callgraphReport && (
+        <div style={{
+          position: 'absolute', top: 52, left: 12, zIndex: 10,
+          background: 'var(--surface)', border: '1px solid var(--border)',
+          borderRadius: 6, padding: '5px 10px', fontSize: 11,
+          color: 'var(--text-muted)',
+        }}>
+          {callgraphReport.nodes.length} fns · {callgraphReport.resolved_calls} resolved
+          · {callgraphReport.unresolved_calls} unresolved
+        </div>
+      )}
 
       {/* ── stats card (bottom-left) ───────────────────────────────────── */}
-      {model && (
+      {model && graphMode === 'files' && (
         <div style={{
           position: 'absolute', bottom: 16, left: 12, zIndex: 10,
           background: 'var(--surface)', border: '1px solid var(--border)',
@@ -359,57 +618,74 @@ export default function GraphView() {
         </div>
       )}
 
-      {/* ── legend (bottom-right) ─────────────────────────────────────── */}
-      <div style={{
-        position: 'absolute', bottom: 16, right: 12, zIndex: 10,
-        background: 'var(--surface)', border: '1px solid var(--border)',
-        borderRadius: 8, fontSize: 11, color: 'var(--text-muted)',
-        overflow: 'hidden', minWidth: 160,
-      }}>
-        <button
-          onClick={() => setLegendOpen(o => !o)}
-          style={{
-            display: 'flex', alignItems: 'center', justifyContent: 'space-between',
-            width: '100%', padding: '7px 12px', background: 'none', border: 'none',
-            color: 'var(--text-muted)', cursor: 'pointer', fontSize: 11,
-          }}
-        >
-          <span style={{ fontWeight: 600 }}>Legend</span>
-          {legendOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-        </button>
-        {legendOpen && (
-          <div style={{ padding: '0 12px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
-            <LegendSection title="Layers (left border)">
-              {layerOrder.map(name => (
-                <LegendRow key={name} swatch={layerColors[name] ?? '#8892aa'} label={name} />
-              ))}
-            </LegendSection>
-            <LegendSection title="Fill colour (instability)">
-              <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', marginBottom: 4 }}>
-                fan_out / (fan_in + fan_out)
-                <InfoTip title={METRIC_HELP.instability.label} formula={METRIC_HELP.instability.formula}>{METRIC_HELP.instability.body}</InfoTip>
-              </span>
-              <LegendRow swatch="#6366f1" label="stable (I ≈ 0)" />
-              <LegendRow swatch="#fbbf24" label="balanced" />
-              <LegendRow swatch="#f87171" label="unstable (I ≈ 1)" />
-            </LegendSection>
-            <LegendSection title="Badges">
-              <LegendRow swatch="↻" label="dependency cycle" text extra={<InfoTip title={METRIC_HELP.cycle.label}>{METRIC_HELP.cycle.body}</InfoTip>} />
-              <LegendRow swatch="★" label="hub (top-10% fan-in)" text extra={<InfoTip title={METRIC_HELP.hub.label}>{METRIC_HELP.hub.body}</InfoTip>} />
-              <LegendRow swatch="⚠" label="violation source" text extra={<InfoTip title={METRIC_HELP.violations.label}>{METRIC_HELP.violations.body}</InfoTip>} />
-              <LegendRow swatch="⎘" label="near-duplicate" text extra={<InfoTip title={METRIC_HELP.similarity.label} formula={METRIC_HELP.similarity.formula}>{METRIC_HELP.similarity.body}</InfoTip>} />
-            </LegendSection>
-            <LegendSection title="Edges">
-              <LegendRow swatch="#4338ca" label="import" />
-              <LegendRow swatch="#fbbf24" label="re-export" />
-              <LegendRow swatch="#f87171" label="violation / cycle" />
-            </LegendSection>
-          </div>
-        )}
-      </div>
+      {/* ── legend (bottom-right, files mode only) ────────────────────── */}
+      {graphMode === 'files' && (
+        <div style={{
+          position: 'absolute', bottom: 16, right: 12, zIndex: 10,
+          background: 'var(--surface)', border: '1px solid var(--border)',
+          borderRadius: 8, fontSize: 11, color: 'var(--text-muted)',
+          overflow: 'hidden', minWidth: 160,
+        }}>
+          <button
+            onClick={() => setLegendOpen(o => !o)}
+            style={{
+              display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+              width: '100%', padding: '7px 12px', background: 'none', border: 'none',
+              color: 'var(--text-muted)', cursor: 'pointer', fontSize: 11,
+            }}
+          >
+            <span style={{ fontWeight: 600 }}>Legend</span>
+            {legendOpen ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+          </button>
+          {legendOpen && (
+            <div style={{ padding: '0 12px 10px', display: 'flex', flexDirection: 'column', gap: 5 }}>
+              <LegendSection title="Layers (left border)">
+                {layerOrder.map(name => (
+                  <LegendRow key={name} swatch={layerColors[name] ?? '#8892aa'} label={name} />
+                ))}
+              </LegendSection>
+              <LegendSection title="Fill colour (instability)">
+                <span style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', marginBottom: 4 }}>
+                  fan_out / (fan_in + fan_out)
+                  <InfoTip title={METRIC_HELP.instability.label} formula={METRIC_HELP.instability.formula}>{METRIC_HELP.instability.body}</InfoTip>
+                </span>
+                <LegendRow swatch="#6366f1" label="stable (I ≈ 0)" />
+                <LegendRow swatch="#fbbf24" label="balanced" />
+                <LegendRow swatch="#f87171" label="unstable (I ≈ 1)" />
+              </LegendSection>
+              <LegendSection title="Badges">
+                <LegendRow swatch="↻" label="dependency cycle" text extra={<InfoTip title={METRIC_HELP.cycle.label}>{METRIC_HELP.cycle.body}</InfoTip>} />
+                <LegendRow swatch="★" label="hub (top-10% fan-in)" text extra={<InfoTip title={METRIC_HELP.hub.label}>{METRIC_HELP.hub.body}</InfoTip>} />
+                <LegendRow swatch="⚠" label="violation source" text extra={<InfoTip title={METRIC_HELP.violations.label}>{METRIC_HELP.violations.body}</InfoTip>} />
+                <LegendRow swatch="⎘" label="near-duplicate" text extra={<InfoTip title={METRIC_HELP.similarity.label} formula={METRIC_HELP.similarity.formula}>{METRIC_HELP.similarity.body}</InfoTip>} />
+              </LegendSection>
+              <LegendSection title="Edges">
+                <LegendRow swatch="#4338ca" label="import" />
+                <LegendRow swatch="#fbbf24" label="re-export / branch" />
+                <LegendRow swatch="#f87171" label="violation / cycle" />
+              </LegendSection>
+            </div>
+          )}
+        </div>
+      )}
 
-      {/* ── detail panel (right side) ─────────────────────────────────── */}
-      {selectedModule && selectedMetrics && selectedSignals && (
+      {/* ── grouped mode legend ───────────────────────────────────────── */}
+      {graphMode !== 'files' && (
+        <div style={{
+          position: 'absolute', bottom: 16, right: 12, zIndex: 10,
+          background: 'var(--surface)', border: '1px solid var(--border)',
+          borderRadius: 8, padding: '8px 12px', fontSize: 11,
+          color: 'var(--text-muted)', display: 'flex', flexDirection: 'column', gap: 4,
+        }}>
+          <LegendRow swatch="#4338ca" label="dependency" />
+          <LegendRow swatch="#fbbf24" label="upward (cross-layer)" />
+          <LegendRow swatch="#f87171" label="violation" />
+          {graphMode === 'scc' && <LegendRow swatch="#ef4444" label="SCC cluster node" />}
+        </div>
+      )}
+
+      {/* ── detail panel (files mode, right side) ─────────────────────── */}
+      {graphMode === 'files' && selectedModule && selectedMetrics && selectedSignals && (
         <DetailPanel
           module={selectedModule}
           metrics={selectedMetrics}
@@ -448,7 +724,7 @@ function FilterPill({
   )
 }
 
-// ─── detail panel ─────────────────────────────────────────────────────────────
+// ─── detail panel (files mode) ───────────────────────────────────────────────
 
 function DetailPanel({
   module: m, metrics, signals, violations, deps, depOf, layerColors, onSelect, onFocus, onClose,

@@ -8,6 +8,7 @@ pub mod intent;
 pub mod model;
 pub mod parse;
 pub mod resolve;
+pub mod rollup;
 pub mod snapshot;
 pub mod typeshape;
 

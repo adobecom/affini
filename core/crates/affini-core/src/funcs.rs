@@ -44,6 +44,11 @@ pub struct RawCall {
     pub arg_texts: Vec<String>,
     /// True when this call site is inside a conditional/loop/catch.
     pub branchy: bool,
+    /// Index into the enclosing function's `branchy_ranges` list for the
+    /// most-specific (smallest) enclosing branch block.  Two calls inside the
+    /// same `if`/`for`/`switch` body share the same `branch_id`.
+    #[serde(default)]
+    pub branch_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -147,9 +152,20 @@ pub fn extract_functions(path: &str, source: &str) -> Result<Vec<RawFunction>> {
             .into_iter()
             .enumerate()
             .map(|(call_idx, (call_start, info))| {
-                let branchy = branchy_ranges
+                // Find the most-specific (smallest span) enclosing branchy block
+                // that is also entirely inside this function body.
+                let branch_id = branchy_ranges
                     .iter()
-                    .any(|(bs, be)| call_start >= *bs && call_start < *be && *bs >= fn_start && *be <= fn_end);
+                    .enumerate()
+                    .filter(|(_, (bs, be))| {
+                        call_start >= *bs
+                            && call_start < *be
+                            && *bs >= fn_start
+                            && *be <= fn_end
+                    })
+                    .min_by_key(|(_, (bs, be))| be - bs)
+                    .map(|(i, _)| i as u32);
+                let branchy = branch_id.is_some();
                 RawCall {
                     callee_text: info.callee_text,
                     callee_root: info.callee_root,
@@ -157,6 +173,7 @@ pub fn extract_functions(path: &str, source: &str) -> Result<Vec<RawFunction>> {
                     call_order: call_idx as u32,
                     arg_texts: info.arg_texts,
                     branchy,
+                    branch_id,
                 }
             })
             .collect();

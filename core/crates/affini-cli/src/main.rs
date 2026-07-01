@@ -3,10 +3,11 @@ mod ai;
 use affini_core::{
     diff::diff,
     dupes::{find_dupes, DEFAULT_THRESHOLD},
-    flows::compute_flows_full,
-    graph::scan,
+    flows::{build_call_graph_report, compute_flows_full},
+    graph::{scan, IGNORED_DIRS},
     intent::{self, Severity},
     model::Model,
+    rollup::{rollup, GroupBy},
     snapshot::SnapshotStore,
 };
 use anyhow::{bail, Context, Result};
@@ -22,6 +23,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
+    sync::{Arc, RwLock},
 };
 use tokio::net::TcpListener;
 use tower_http::cors::{Any, CorsLayer};
@@ -279,16 +281,37 @@ fn render_intent_toml(
 // serve — HTTP API for the web UI
 // ---------------------------------------------------------------------------
 
+/// Shared server state.  `root` and `intent_path` are behind `RwLock` so
+/// POST /api/root can switch the scanned repo at runtime without a restart.
+/// `fs_root` is immutable: it is the canonicalized parent of the initial
+/// launch path and acts as a sandbox ceiling for the file-browser endpoints.
 #[derive(Clone)]
 struct AppState {
-    root: PathBuf,
-    intent_path: Option<PathBuf>,
+    root: Arc<RwLock<PathBuf>>,
+    intent_path: Arc<RwLock<Option<PathBuf>>>,
+    /// Immutable: the directory that bounds all file-browser operations.
+    fs_root: PathBuf,
+}
+
+impl AppState {
+    /// Clone the current root as an owned `PathBuf` (hold the lock only briefly).
+    fn current_root(&self) -> PathBuf {
+        self.root.read().unwrap().clone()
+    }
+    fn current_intent_path(&self) -> Option<PathBuf> {
+        self.intent_path.read().unwrap().clone()
+    }
 }
 
 async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result<()> {
+    let canonical = path.canonicalize()?;
+    // Sandbox ceiling = parent of the launch path (allows browsing siblings).
+    let fs_root = canonical.parent().unwrap_or(&canonical).to_path_buf();
+
     let state = AppState {
-        root: path.canonicalize()?,
-        intent_path: intent_path.map(|p| p.to_path_buf()),
+        root: Arc::new(RwLock::new(canonical)),
+        intent_path: Arc::new(RwLock::new(intent_path.map(|p| p.to_path_buf()))),
+        fs_root,
     };
 
     let cors = CorsLayer::new()
@@ -308,6 +331,11 @@ async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result
         .route("/api/flows/:id",          get(handler_flow_by_id))
         .route("/api/flows/:id/explain",  post(handler_flow_explain))
         .route("/api/ai/status",          get(handler_ai_status))
+        // ── new endpoints ────────────────────────────────────────────────────
+        .route("/api/graph/grouped",      get(handler_grouped_graph))
+        .route("/api/callgraph",          get(handler_callgraph))
+        .route("/api/fs/list",            get(handler_fs_list))
+        .route("/api/root",               post(handler_set_root))
         .layer(cors)
         .with_state(state);
 
@@ -325,7 +353,8 @@ async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result
 // ---------------------------------------------------------------------------
 
 async fn handler_model(State(s): State<AppState>) -> impl IntoResponse {
-    match scan(&s.root) {
+    let root = s.current_root();
+    match scan(&root) {
         Ok(mut m) => {
             // Enrich with layer assignments from affini.toml (optional — skip if absent).
             if let Some(intent) = load_intent_opt(&s) {
@@ -339,6 +368,7 @@ async fn handler_model(State(s): State<AppState>) -> impl IntoResponse {
 }
 
 async fn handler_check(State(s): State<AppState>) -> impl IntoResponse {
+    let root = s.current_root();
     let intent_path = resolve_intent(&s);
     if !intent_path.exists() {
         return (
@@ -347,14 +377,15 @@ async fn handler_check(State(s): State<AppState>) -> impl IntoResponse {
         )
             .into_response();
     }
-    match (intent::load(&intent_path), scan(&s.root)) {
+    match (intent::load(&intent_path), scan(&root)) {
         (Ok(intent), Ok(model)) => json_ok(intent::check(&model, &intent)),
         (Err(e), _) | (_, Err(e)) => err500(e),
     }
 }
 
 async fn handler_snapshots(State(s): State<AppState>) -> impl IntoResponse {
-    match SnapshotStore::open(&s.root).and_then(|st| st.list()) {
+    let root = s.current_root();
+    match SnapshotStore::open(&root).and_then(|st| st.list()) {
         Ok(list) => json_ok(list),
         Err(e) => err500(e),
     }
@@ -375,7 +406,8 @@ struct TrendPoint {
 }
 
 async fn handler_trends(State(s): State<AppState>) -> impl IntoResponse {
-    let store = match SnapshotStore::open(&s.root) {
+    let root = s.current_root();
+    let store = match SnapshotStore::open(&root) {
         Ok(st) => st,
         Err(e) => return err500(e),
     };
@@ -399,7 +431,7 @@ async fn handler_trends(State(s): State<AppState>) -> impl IntoResponse {
     // already labelled "workdir" (which would produce a duplicate data point).
     let has_workdir_snapshot = metas.iter().any(|m| m.label == "workdir");
     if !has_workdir_snapshot {
-        if let Ok(model) = scan(&s.root) {
+        if let Ok(model) = scan(&root) {
             use std::time::{SystemTime, UNIX_EPOCH};
             let now = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
@@ -454,13 +486,14 @@ async fn handler_diff(
     State(s): State<AppState>,
     AxumQuery(params): AxumQuery<DiffParams>,
 ) -> impl IntoResponse {
-    let store = match SnapshotStore::open(&s.root) {
+    let root = s.current_root();
+    let store = match SnapshotStore::open(&root) {
         Ok(st) => st,
         Err(e) => return err500(e),
     };
 
     let model_b = match params.to.as_deref() {
-        Some("workdir") | None => scan(&s.root).context("workdir scan"),
+        Some("workdir") | None => scan(&root).context("workdir scan"),
         Some(label) => match store.load(label) {
             Ok(Some(m)) => Ok(m),
             Ok(None) => Err(anyhow::anyhow!("snapshot '{label}' not found")),
@@ -482,7 +515,7 @@ async fn handler_diff(
     });
 
     let model_a = match from_label.as_deref() {
-        Some("workdir") => scan(&s.root).ok(),
+        Some("workdir") => scan(&root).ok(),
         Some(label) => store.load(label).ok().flatten(),
         None => store
             .list_chronological()
@@ -499,7 +532,8 @@ async fn handler_diff(
 
 // GET /api/baseline
 async fn handler_baseline_get(State(s): State<AppState>) -> impl IntoResponse {
-    match SnapshotStore::open(&s.root).and_then(|st| st.load_baseline()) {
+    let root = s.current_root();
+    match SnapshotStore::open(&root).and_then(|st| st.load_baseline()) {
         Ok(Some(b)) => json_ok(b),
         Ok(None) => (StatusCode::NO_CONTENT, "").into_response(),
         Err(e) => err500(e),
@@ -516,7 +550,8 @@ async fn handler_baseline_post(
     State(s): State<AppState>,
     Json(body): Json<BaselineBody>,
 ) -> impl IntoResponse {
-    match SnapshotStore::open(&s.root) {
+    let root = s.current_root();
+    match SnapshotStore::open(&root) {
         Ok(store) => {
             // If label is "workdir", save current scan as a snapshot first.
             if body.label == "workdir" {
@@ -526,7 +561,7 @@ async fn handler_baseline_post(
                     .unwrap_or_default()
                     .as_secs();
                 let label = format!("seen_{ts}");
-                if let Ok(model) = scan(&s.root) {
+                if let Ok(model) = scan(&root) {
                     let _ = store.save(&label, &model);
                     if let Err(e) = store.save_baseline(&label) {
                         return err500(e);
@@ -563,12 +598,13 @@ async fn handler_dupes(
     State(s): State<AppState>,
     AxumQuery(params): AxumQuery<DupesParams>,
 ) -> impl IntoResponse {
+    let root = s.current_root();
     let threshold = params
         .threshold
         .map(|t| t.clamp(0.1, 1.0))
         .unwrap_or(DEFAULT_THRESHOLD);
-    match scan(&s.root) {
-        Ok(model) => json_ok(find_dupes(&model, &s.root, threshold)),
+    match scan(&root) {
+        Ok(model) => json_ok(find_dupes(&model, &root, threshold)),
         Err(e) => err500(e),
     }
 }
@@ -579,17 +615,16 @@ async fn handler_dupes(
 // ---------------------------------------------------------------------------
 
 async fn handler_flows(State(s): State<AppState>) -> impl IntoResponse {
-    use std::collections::HashSet;
-    let model = match scan(&s.root) {
+    let root = s.current_root();
+    let model = match scan(&root) {
         Ok(m) => m,
         Err(e) => return err500(e),
     };
-    let violations = match load_intent_opt(&s) {
-        Some(intent) => intent::check(&model, &intent),
-        None => vec![],
-    };
+    let intent_opt = load_intent_opt(&s);
+    let violations = intent_opt.as_ref().map(|i| intent::check(&model, i)).unwrap_or_default();
+    let features = intent_opt.as_ref().map(|i| i.features.clone()).unwrap_or_default();
     let changed_paths = resolve_changed_paths(&s, &model);
-    let report = compute_flows_full(&model, &s.root, &violations, &changed_paths);
+    let report = compute_flows_full(&model, &root, &violations, &changed_paths, &features);
     json_ok(report.summaries.flows)
 }
 
@@ -597,17 +632,16 @@ async fn handler_flow_by_id(
     State(s): State<AppState>,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
-    use std::collections::HashSet;
-    let model = match scan(&s.root) {
+    let root = s.current_root();
+    let model = match scan(&root) {
         Ok(m) => m,
         Err(e) => return err500(e),
     };
-    let violations = match load_intent_opt(&s) {
-        Some(intent) => intent::check(&model, &intent),
-        None => vec![],
-    };
+    let intent_opt = load_intent_opt(&s);
+    let violations = intent_opt.as_ref().map(|i| intent::check(&model, i)).unwrap_or_default();
+    let features = intent_opt.as_ref().map(|i| i.features.clone()).unwrap_or_default();
     let changed_paths = resolve_changed_paths(&s, &model);
-    let report = compute_flows_full(&model, &s.root, &violations, &changed_paths);
+    let report = compute_flows_full(&model, &root, &violations, &changed_paths, &features);
     match report.flows.into_iter().find(|f| f.id == id) {
         Some(flow) => json_ok(flow),
         None => (StatusCode::NOT_FOUND, format!("flow '{}' not found", id)).into_response(),
@@ -634,16 +668,16 @@ async fn handler_flow_explain(
             .into_response();
     }
 
-    let model = match scan(&s.root) {
+    let root = s.current_root();
+    let model = match scan(&root) {
         Ok(m) => m,
         Err(e) => return err500(e),
     };
-    let violations = match load_intent_opt(&s) {
-        Some(intent) => intent::check(&model, &intent),
-        None => vec![],
-    };
+    let intent_opt = load_intent_opt(&s);
+    let violations = intent_opt.as_ref().map(|i| intent::check(&model, i)).unwrap_or_default();
+    let features = intent_opt.as_ref().map(|i| i.features.clone()).unwrap_or_default();
     let changed_paths = resolve_changed_paths(&s, &model);
-    let report = compute_flows_full(&model, &s.root, &violations, &changed_paths);
+    let report = compute_flows_full(&model, &root, &violations, &changed_paths, &features);
 
     let flow = match report.flows.into_iter().find(|f| f.id == id) {
         Some(f) => f,
@@ -665,9 +699,182 @@ async fn handler_flow_explain(
     }
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/graph/grouped?by=directory|layer|scc&depth=<n>
+// Returns a GroupedGraph — modules collapsed into groups with aggregated edges.
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct GroupedParams {
+    by: Option<String>,
+    depth: Option<u32>,
+}
+
+async fn handler_grouped_graph(
+    State(s): State<AppState>,
+    AxumQuery(params): AxumQuery<GroupedParams>,
+) -> impl IntoResponse {
+    let root = s.current_root();
+    // Load intent once so layer assignment and violation check use the same snapshot.
+    let intent_opt = load_intent_opt(&s);
+    let model = match scan(&root) {
+        Ok(mut m) => {
+            if let Some(ref intent) = intent_opt {
+                m.layers = intent::assign_layers(&m, intent);
+                m.layer_order = intent.rules.layers.clone();
+            }
+            m
+        }
+        Err(e) => return err500(e),
+    };
+
+    let violations = intent_opt
+        .map(|i| intent::check(&model, &i))
+        .unwrap_or_default();
+
+    let group_by = match params.by.as_deref().unwrap_or("directory") {
+        "layer" => GroupBy::Layer,
+        "scc"   => GroupBy::Scc,
+        _       => GroupBy::Directory,
+    };
+
+    json_ok(rollup(&model, group_by, params.depth, &violations))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/callgraph?entry=<function-key>
+// Returns the full function-level call graph (or a DFS subgraph if `entry` given).
+// ---------------------------------------------------------------------------
+
+async fn handler_callgraph(
+    State(s): State<AppState>,
+) -> impl IntoResponse {
+    let root = s.current_root();
+    let model = match scan(&root) {
+        Ok(m) => m,
+        Err(e) => return err500(e),
+    };
+    json_ok(build_call_graph_report(&model, &root))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/fs/list?path=<absolute-or-relative>
+// Lists child directories under `path` (sandboxed to fs_root).
+// ---------------------------------------------------------------------------
+
+#[derive(Serialize)]
+struct FsEntry {
+    name: String,
+    path: String,
+    is_dir: bool,
+    has_affini: bool,
+}
+
+#[derive(Serialize)]
+struct FsListing {
+    cwd: String,
+    parent: Option<String>,
+    entries: Vec<FsEntry>,
+}
+
+#[derive(Deserialize)]
+struct FsListParams {
+    path: Option<String>,
+}
+
+async fn handler_fs_list(
+    State(s): State<AppState>,
+    AxumQuery(params): AxumQuery<FsListParams>,
+) -> impl IntoResponse {
+    let target = match params.path {
+        Some(p) => PathBuf::from(p),
+        None    => s.current_root(),
+    };
+
+    // Canonicalize and sandbox-check.
+    let canonical = match target.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "path not found").into_response(),
+    };
+    if !canonical.starts_with(&s.fs_root) {
+        return (StatusCode::FORBIDDEN, "path is outside the allowed root").into_response();
+    }
+    if !canonical.is_dir() {
+        return (StatusCode::BAD_REQUEST, "path is not a directory").into_response();
+    }
+
+    let parent = canonical
+        .parent()
+        .filter(|p| p.starts_with(&s.fs_root))
+        .map(|p| p.to_string_lossy().to_string());
+
+    let mut entries: Vec<FsEntry> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&canonical) {
+        for entry in rd.flatten() {
+            let name = entry.file_name().to_string_lossy().to_string();
+            // Skip hidden dirs and IGNORED_DIRS.
+            if name.starts_with('.') { continue; }
+            if IGNORED_DIRS.contains(&name.as_str()) { continue; }
+            let meta = match entry.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.is_dir() {
+                let path_str = entry.path().to_string_lossy().to_string();
+                let has_affini = entry.path().join("affini.toml").exists();
+                entries.push(FsEntry { name, path: path_str, is_dir: true, has_affini });
+            }
+        }
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+
+    json_ok(FsListing {
+        cwd: canonical.to_string_lossy().to_string(),
+        parent,
+        entries,
+    })
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/root  { "path": "<absolute>" }
+// Switch the scanned repo root at runtime (sandboxed to fs_root).
+// ---------------------------------------------------------------------------
+
+#[derive(Deserialize)]
+struct SetRootBody {
+    path: String,
+}
+
+async fn handler_set_root(
+    State(s): State<AppState>,
+    Json(body): Json<SetRootBody>,
+) -> impl IntoResponse {
+    let target = PathBuf::from(&body.path);
+    let canonical = match target.canonicalize() {
+        Ok(p) => p,
+        Err(_) => return (StatusCode::NOT_FOUND, "path not found").into_response(),
+    };
+    if !canonical.starts_with(&s.fs_root) {
+        return (StatusCode::FORBIDDEN, "path is outside the allowed root").into_response();
+    }
+    if !canonical.is_dir() {
+        return (StatusCode::BAD_REQUEST, "path is not a directory").into_response();
+    }
+
+    // Apply the new root.
+    *s.root.write().unwrap() = canonical.clone();
+    // Reset intent_path so it falls back to <new-root>/affini.toml.
+    *s.intent_path.write().unwrap() = None;
+
+    let root_str = canonical.to_string_lossy().to_string();
+    eprintln!("affini root switched → {root_str}");
+    json_ok(serde_json::json!({ "ok": true, "root": root_str }))
+}
+
 fn resolve_changed_paths(s: &AppState, model: &Model) -> std::collections::HashSet<String> {
+    let root = s.current_root();
     let mut set = std::collections::HashSet::new();
-    if let Ok(store) = SnapshotStore::open(&s.root) {
+    if let Ok(store) = SnapshotStore::open(&root) {
         if let Ok(Some(baseline)) = store.load_baseline() {
             if let Ok(Some(baseline_model)) = store.load(&baseline.label) {
                 let d = diff(&baseline_model, model);
@@ -718,7 +925,17 @@ async fn cmd_flows(path: &Path, intent_path: Option<&Path>, output: Option<&Path
     };
 
     let canon = path.canonicalize()?;
-    let report = compute_flows_full(&model, &canon, &violations, &changed_paths);
+    let features: Vec<_> = if let Some(ip) = intent_path {
+        intent::load(ip).map(|i| i.features).unwrap_or_default()
+    } else {
+        let default_path = path.join("affini.toml");
+        if default_path.exists() {
+            intent::load(&default_path).map(|i| i.features).unwrap_or_default()
+        } else {
+            vec![]
+        }
+    };
+    let report = compute_flows_full(&model, &canon, &violations, &changed_paths, &features);
     let json = serde_json::to_string_pretty(&report)?;
 
     eprintln!(
@@ -743,9 +960,8 @@ async fn cmd_flows(path: &Path, intent_path: Option<&Path>, output: Option<&Path
 // ---------------------------------------------------------------------------
 
 fn resolve_intent(s: &AppState) -> PathBuf {
-    s.intent_path
-        .clone()
-        .unwrap_or_else(|| s.root.join("affini.toml"))
+    s.current_intent_path()
+        .unwrap_or_else(|| s.current_root().join("affini.toml"))
 }
 
 fn load_intent_opt(s: &AppState) -> Option<intent::IntentFile> {

@@ -169,6 +169,12 @@ export interface FragilityFlag {
 }
 
 export interface FlowStep {
+  /** Sequential id within the flow (0-based); stable node key for branch-tree layout. */
+  id: number
+  /** Id of the parent step; null means direct child of entry. */
+  parent: number | null
+  /** Steps sharing the same caller + enclosing branch block have the same branch_group. */
+  branch_group: number | null
   from: FunctionId
   to: FunctionId
   call_site_order: number
@@ -198,6 +204,9 @@ export interface FlowSummary {
   kind: string
   step_count: number
   fragility_summary: FragilitySummary
+  /** True when this flow was explicitly declared in affini.toml [[features]]. */
+  declared: boolean
+  feature_name: string | null
 }
 
 export interface Flow extends FlowSummary {
@@ -214,3 +223,97 @@ export const fetchFlow  = (id: string) => request<Flow>(`/flows/${encodeURICompo
 export const fetchAiStatus = () => request<{ enabled: boolean }>('/ai/status')
 export const explainFlow   = (id: string) =>
   request<{ explanation: string }>(`/flows/${encodeURIComponent(id)}/explain`, { method: 'POST' })
+
+// ── Grouped graph (rollup views) ───────────────────────────────────────────
+
+export interface GroupNode {
+  id: number
+  key: string
+  label: string
+  member_ids: number[]
+  loc: number
+  file_count: number
+  /** True for multi-file SCC clusters. */
+  is_cluster: boolean
+}
+
+export interface GroupEdge {
+  from: number
+  to: number
+  weight: number
+  violation: boolean
+  /** True when this edge goes from a lower-stability layer to a higher-stability one (bad direction). */
+  cross_layer_up: boolean
+}
+
+export interface GroupedGraph {
+  nodes: GroupNode[]
+  edges: GroupEdge[]
+  group_by: string
+  layer_order: string[]
+}
+
+export type GroupBy = 'directory' | 'layer' | 'scc'
+
+export const fetchGroupedGraph = (by: GroupBy, depth?: number) => {
+  const params = new URLSearchParams({ by })
+  if (depth !== undefined) params.set('depth', String(depth))
+  return request<GroupedGraph>(`/graph/grouped?${params}`)
+}
+
+// ── Function-level call graph ──────────────────────────────────────────────
+
+export interface CallGraphNode {
+  id: FunctionId
+  label: string
+  module: number
+  module_path: string
+  exported: boolean
+}
+
+export interface CallGraphEdge {
+  from: FunctionId
+  to: FunctionId
+  call_count: number
+  branchy: boolean
+}
+
+export interface CallGraphReport {
+  nodes: CallGraphNode[]
+  edges: CallGraphEdge[]
+  resolved_calls: number
+  unresolved_calls: number
+}
+
+export const fetchCallGraph = (entry?: string) => {
+  const qs = entry ? `?entry=${encodeURIComponent(entry)}` : ''
+  return request<CallGraphReport>(`/callgraph${qs}`)
+}
+
+// ── File-system browser (for in-app root picker) ───────────────────────────
+
+export interface FsEntry {
+  name: string
+  path: string
+  is_dir: boolean
+  /** Whether affini.toml exists directly inside this directory. */
+  has_affini: boolean
+}
+
+export interface FsListing {
+  cwd: string
+  parent: string | null
+  entries: FsEntry[]
+}
+
+export const fetchFsList = (path?: string) => {
+  const qs = path ? `?path=${encodeURIComponent(path)}` : ''
+  return request<FsListing>(`/fs/list${qs}`)
+}
+
+export const postRoot = (path: string) =>
+  request<{ ok: boolean; root: string }>('/root', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  })

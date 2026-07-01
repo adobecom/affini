@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use walkdir::WalkDir;
 
-const IGNORED_DIRS: &[&str] = &[
+pub const IGNORED_DIRS: &[&str] = &[
     "node_modules",
     ".git",
     "dist",
