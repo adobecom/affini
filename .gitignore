@@ -2,8 +2,8 @@
 core/target/
 
 # Node
-ui/node_modules/
-ui/dist/
+node_modules/
+dist/
 
 # Affini local cache
 .affini/
