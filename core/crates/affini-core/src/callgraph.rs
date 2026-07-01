@@ -60,6 +60,11 @@ pub struct CallEdge {
     pub call_site_order: u32,
     pub arg_texts: Vec<String>,
     pub branchy: bool,
+    /// Index of the most-specific enclosing branch block within the caller's body.
+    /// Matches `RawCall.branch_id`.  Two calls sharing the same `branch_id` are
+    /// siblings inside the same conditional/loop block.
+    #[serde(default)]
+    pub branch_id: Option<u32>,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -172,6 +177,7 @@ pub fn build_call_graph(root: &Path, files: &[FileData], model: &Model) -> CallG
                     call_site_order: rc.call_order,
                     arg_texts: rc.arg_texts.clone(),
                     branchy: rc.branchy,
+                    branch_id: rc.branch_id,
                 });
             }
         }

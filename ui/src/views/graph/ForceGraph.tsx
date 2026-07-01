@@ -7,6 +7,7 @@ import {
 import { ModuleNode } from './ModuleNode'
 import { buildLayerColors, layerColor } from './layers'
 import { edgePath, NODE_H } from './edgePath'
+import { computeRankedLayout } from './dagreLayout'
 import type { ModuleMetrics } from '../../api'
 import type { ModuleSignals } from './ModuleNode'
 
@@ -60,6 +61,8 @@ export interface ForceGraphProps {
   layerOrder: string[]
   onNodeClick: (id: number) => void
   onPaneClick: () => void
+  /** 'force' uses the D3 sim; 'ranked' uses a static dagre BT layout. Default: 'force'. */
+  layoutMode?: 'force' | 'ranked'
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -82,7 +85,9 @@ function markerId(color: string): string {
 
 // ─── component ────────────────────────────────────────────────────────────────
 
-export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick }: ForceGraphProps) {
+export function ForceGraph({
+  nodes, edges, layerOrder, onNodeClick, onPaneClick, layoutMode = 'force',
+}: ForceGraphProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const svgRef       = useRef<SVGSVGElement>(null)
   const gRef         = useRef<SVGGElement>(null)
@@ -102,10 +107,25 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
     [nodes, layerOrder],
   )
 
-  // ── zoom setup (runs once) ────────────────────────────────────────────────
+  // Ranked layout positions (only computed in ranked mode)
+  const rankedLayout = useMemo(() => {
+    if (layoutMode !== 'ranked') return null
+    return computeRankedLayout(
+      nodes.map(n => ({ id: n.id, width: n.width, layer: n.layer })),
+      edges.map(e => ({ fromId: e.fromId, toId: e.toId })),
+      layerOrder,
+    )
+  }, [layoutMode, nodes, edges, layerOrder])
+
+  // ── zoom setup (force mode only — ranked mode uses native container scroll) ──
   useEffect(() => {
     const svgEl = svgRef.current
     if (!svgEl) return
+    if (layoutMode === 'ranked') {
+      // Remove any previously attached zoom handler when switching to ranked.
+      select(svgEl).on('.zoom', null)
+      return
+    }
     const zb = d3zoom<SVGSVGElement, unknown>()
       .scaleExtent([0.05, 5])
       .filter(ev =>
@@ -117,10 +137,32 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
       })
     select(svgEl).call(zb)
     return () => { select(svgEl).on('.zoom', null) }
-  }, [])
+  }, [layoutMode])
 
-  // ── simulation rebuild on data change ─────────────────────────────────────
+  // ── simulation rebuild on data change (force mode only) ───────────────────
   useEffect(() => {
+    if (layoutMode === 'ranked') {
+      // Populate graphNodesRef from dagre positions so the render path below works.
+      if (!rankedLayout) return
+      graphNodesRef.current = nodes.map(n => {
+        const pos = rankedLayout.positions.get(n.id)
+        return { ...n, x: pos?.x ?? 0, y: pos?.y ?? 0 } as SimNode
+      })
+      graphEdgesRef.current = edges
+        .filter(e => nodes.some(n => n.id === e.fromId) && nodes.some(n => n.id === e.toId))
+        .map(e => ({
+          edgeId: e.id,
+          source: e.fromId,
+          target: e.toId,
+          color: e.color,
+          strokeWidth: e.strokeWidth,
+          dashed: e.dashed,
+          dimmed: e.dimmed,
+        }))
+      forceUpdate()
+      return
+    }
+
     const container = containerRef.current
     const W = container?.clientWidth  ?? 900
     const H = container?.clientHeight ?? 650
@@ -195,10 +237,11 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
       }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [nodes, edges, layerOrder])
+  }, [nodes, edges, layerOrder, layoutMode])
 
-  // ── node drag ─────────────────────────────────────────────────────────────
+  // ── node drag (force mode only) ───────────────────────────────────────────
   const handleNodeMouseDown = useCallback((e: React.MouseEvent, nodeId: number) => {
+    if (layoutMode === 'ranked') return
     e.stopPropagation()
     e.nativeEvent.stopPropagation()
 
@@ -228,35 +271,43 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
     }
     document.addEventListener('mousemove', onMove)
     document.addEventListener('mouseup', onUp)
-  }, [])
+  }, [layoutMode])
 
   const handleNodeClick = useCallback((e: React.MouseEvent, nodeId: number) => {
     e.stopPropagation()
     onNodeClick(nodeId)
   }, [onNodeClick])
 
-  // ── layer band data ───────────────────────────────────────────────────────
-  // Uses populatedOrder (populated layers only) so bands tile the visible
-  // canvas without gaps when some declared layers have no matching modules.
+  // ── layer band data (force mode bands only) ───────────────────────────────
   const H = containerRef.current?.clientHeight ?? 650
   const margin = 90
-  const layerBands = populatedOrder.map(name => {
+  const layerBands = layoutMode === 'force' ? populatedOrder.map(name => {
     const yC    = layerTargetY(name, populatedOrder, H)
     const bandH = populatedOrder.length > 0 ? (H - margin * 2) / populatedOrder.length : H
     const color = layerColors[name] ?? '#8892aa'
     return { name, yTop: yC - bandH / 2, height: bandH, color }
-  })
+  }) : []
 
   const graphNodes = graphNodesRef.current
   const graphEdges = graphEdgesRef.current
 
+  // Ranked mode: SVG is scrollable with dagre dimensions
+  const svgWidth  = layoutMode === 'ranked' ? (rankedLayout?.width  ?? 800) : undefined
+  const svgHeight = layoutMode === 'ranked' ? (rankedLayout?.height ?? 600) : undefined
+
   return (
-    <div ref={containerRef} style={{ width: '100%', height: '100%', position: 'relative', overflow: 'hidden' }}>
+    <div
+      ref={containerRef}
+      style={{
+        width: '100%', height: '100%', position: 'relative',
+        overflow: layoutMode === 'ranked' ? 'auto' : 'hidden',
+      }}
+    >
       <svg
         ref={svgRef}
-        width="100%"
-        height="100%"
-        style={{ display: 'block', cursor: 'grab' }}
+        width={svgWidth ?? '100%'}
+        height={svgHeight ?? '100%'}
+        style={{ display: 'block', cursor: layoutMode === 'ranked' ? 'default' : 'grab' }}
         onClick={onPaneClick}
       >
         {/* ── defs: arrowhead markers + glow filter ────────────────────── */}
@@ -285,7 +336,7 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
         {/* ── zoom/pan group ────────────────────────────────────────────── */}
         <g ref={gRef}>
 
-          {/* architectural layer bands */}
+          {/* architectural layer bands (force mode only) */}
           {layerBands.map(band => (
             <g key={band.name}>
               <rect
@@ -335,7 +386,7 @@ export function ForceGraph({ nodes, edges, layerOrder, onNodeClick, onPaneClick 
               overflow="visible"
               onMouseDown={ev => handleNodeMouseDown(ev, n.id)}
               onClick={ev => handleNodeClick(ev, n.id)}
-              style={{ cursor: 'pointer' }}
+              style={{ cursor: layoutMode === 'ranked' ? 'pointer' : 'pointer' }}
             >
               <ModuleNode
                 data={{

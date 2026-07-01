@@ -1,7 +1,7 @@
 /// Feature-flow derivation: entry-point detection, DFS flow walk, fragility computation.
 use crate::callgraph::{CallGraph, CallResolution, FileData, FunctionId, build_call_graph};
 use crate::funcs::{extract_functions, RawFunction};
-use crate::intent::{Severity, Violation};
+use crate::intent::{FeatureDecl, Severity, Violation};
 use crate::model::{Model, NodeId};
 use crate::parse::extract_import_bindings;
 use crate::typeshape::{extract_type_decls, normalize, NormCtx, TypeShape, TypeTable};
@@ -40,6 +40,17 @@ pub struct FragilityFlag {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FlowStep {
+    /// Sequential id within this flow (0-based).  Used as a stable node key
+    /// in the branch-tree layout so a function called from two branches appears
+    /// as two distinct nodes rather than being collapsed into one.
+    pub id: u32,
+    /// Id of the parent step (the step whose call descent produced this one).
+    /// `None` means this step is a direct child of the flow entry.
+    pub parent: Option<u32>,
+    /// All steps that share the same caller and the same enclosing branch block
+    /// have the same `branch_group`.  Siblings within a branch are siblings in
+    /// the tree; separate `if`/`for` blocks produce separate groups.
+    pub branch_group: Option<u32>,
     pub from: FunctionId,
     pub to: FunctionId,
     pub call_site_order: u32,
@@ -85,6 +96,12 @@ pub struct Flow {
     pub steps: Vec<FlowStep>,
     pub fragility_summary: FragilitySummary,
     pub truncated: bool,
+    /// True when this flow was declared explicitly in affini.toml `[[features]]`.
+    #[serde(default)]
+    pub declared: bool,
+    /// Feature name from the `[[features]]` declaration, if any.
+    #[serde(default)]
+    pub feature_name: Option<String>,
 }
 
 /// Thin summary (returned by /api/flows; full flow by /api/flows/:id).
@@ -96,6 +113,12 @@ pub struct FlowSummary {
     pub kind: String,
     pub step_count: u32,
     pub fragility_summary: FragilitySummary,
+    /// True when this flow was declared explicitly in affini.toml `[[features]]`.
+    #[serde(default)]
+    pub declared: bool,
+    /// Feature name from the `[[features]]` declaration, if any.
+    #[serde(default)]
+    pub feature_name: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,22 +143,52 @@ pub struct FullFlowsReport {
 
 // ── entry-point detection ────────────────────────────────────────────────────
 
+/// Returns `(FunctionId, FlowKind, declared, feature_name)`.
+/// Declared features and classified surfaces (Route/Cli/Handler/PublicApi)
+/// rank ahead of generic exported entries.
 fn detect_entry_points(
     cg: &CallGraph,
-    _model: &Model,
+    model: &Model,
     _files: &[FileData],
-) -> Vec<(FunctionId, FlowKind)> {
-    let mut entries: Vec<(FunctionId, FlowKind, usize)> = Vec::new();
-
-    // Build fan-in for functions (how many resolved edges point to each fn)
-    let mut fn_fan_in: HashMap<FunctionId, usize> = HashMap::new();
-    for edge in &cg.edges {
-        if let CallResolution::Resolved { target } = &edge.callee {
-            *fn_fan_in.entry(target.clone()).or_insert(0) += 1;
-        }
+    features: &[FeatureDecl],
+) -> Vec<(FunctionId, FlowKind, bool, Option<String>)> {
+    // ── 1. Resolve explicitly declared features ──────────────────────────────
+    let mut declared_entries: Vec<(FunctionId, FlowKind, bool, Option<String>)> = Vec::new();
+    for decl in features {
+        // entry format: "path/to/file.ts#functionName"
+        let (path_part, fn_name) = match decl.entry.split_once('#') {
+            Some(pair) => pair,
+            None => continue,
+        };
+        let module_id = model.module_by_path(path_part).map(|m| m.id);
+        let module_id = match module_id {
+            Some(id) => id,
+            None => continue,
+        };
+        // Find the matching function in the call graph.
+        let fid = cg.functions.values().find(|f| {
+            f.module == module_id && f.display_name == fn_name
+        }).map(|f| f.id.clone());
+        let fid = match fid {
+            Some(f) => f,
+            None => continue,
+        };
+        let kind = match decl.kind.as_deref() {
+            Some("route")        => FlowKind::Route,
+            Some("cli")         => FlowKind::Cli,
+            Some("handler")     => FlowKind::Handler,
+            Some("public_api")  => FlowKind::PublicApi,
+            _                   => classify_entry(fn_name, path_part),
+        };
+        declared_entries.push((fid, kind, true, Some(decl.name.clone())));
     }
 
-    // Count resolved outgoing calls per function (flow size proxy)
+    // ── 2. Auto-detect from exported functions ───────────────────────────────
+    let declared_ids: HashSet<&FunctionId> = declared_entries.iter().map(|(id, _, _, _)| id).collect();
+
+    let mut auto_entries: Vec<(FunctionId, FlowKind, usize, bool)> = Vec::new();
+
+    // Count resolved outgoing calls per function (flow size proxy).
     let mut fn_out_size: HashMap<FunctionId, usize> = HashMap::new();
     for f in cg.functions.values() {
         let out = cg.resolved_edges_from(&f.id).len();
@@ -145,40 +198,40 @@ fn detect_entry_points(
     let test_patterns = ["test", "spec", "__tests__", ".test.", ".spec.", "_test.", "_spec."];
 
     for f in cg.functions.values() {
-        // Exclude test files / declaration files
+        if declared_ids.contains(&f.id) { continue; }
+
         let path = &f.module_path;
         if test_patterns.iter().any(|p| path.contains(p)) { continue; }
         if path.ends_with(".d.ts") { continue; }
-
-        // Must be exported to be a feature entry point
         if !f.exported { continue; }
 
-        // Must have at least 1 resolved call (otherwise nothing to animate)
         let out = fn_out_size.get(&f.id).copied().unwrap_or(0);
         if out == 0 { continue; }
 
-        let name = &f.display_name;
-        let kind = classify_entry(name, path);
-
-        // Score: prefer entries with more resolved outgoing calls (bigger subtree)
-        entries.push((f.id.clone(), kind, out));
+        let kind = classify_entry(&f.display_name, path);
+        // "surface" = anything that isn't a generic ExportedEntry.
+        let is_surface = !matches!(kind, FlowKind::ExportedEntry);
+        auto_entries.push((f.id.clone(), kind, out, is_surface));
     }
 
-    // Sort by subtree size descending
-    entries.sort_by(|a, b| b.2.cmp(&a.2));
+    // Sort: surface entries first, then by subtree size descending.
+    auto_entries.sort_by(|a, b| {
+        b.3.cmp(&a.3).then(b.2.cmp(&a.2))
+    });
 
-    // Deduplicate: keep top N, prefer one entry per module
-    let mut seen_modules: HashSet<NodeId> = HashSet::new();
-    let mut result: Vec<(FunctionId, FlowKind)> = Vec::new();
-
-    for (fid, kind, _) in entries {
-        // Allow up to 3 entries per module, total cap enforced later
-        let count = seen_modules.iter().filter(|&&m| m == fid.module).count();
-        if count >= 3 { continue; }
-        seen_modules.insert(fid.module);
-        result.push((fid, kind));
+    // Deduplicate: allow up to 3 auto entries per module.
+    let mut seen_module_counts: HashMap<NodeId, usize> = HashMap::new();
+    let mut auto_result: Vec<(FunctionId, FlowKind, bool, Option<String>)> = Vec::new();
+    for (fid, kind, _, _) in auto_entries {
+        let count = seen_module_counts.entry(fid.module).or_insert(0);
+        if *count >= 3 { continue; }
+        *count += 1;
+        auto_result.push((fid, kind, false, None));
     }
 
+    // ── 3. Combine: declared first, then auto ────────────────────────────────
+    let mut result = declared_entries;
+    result.extend(auto_result);
     result
 }
 
@@ -207,18 +260,25 @@ fn classify_entry(name: &str, path: &str) -> FlowKind {
 fn sorted_resolved_edges(
     cg: &CallGraph,
     fid: &FunctionId,
-) -> Vec<(u32, FunctionId, String, Vec<String>, bool)> {
+) -> Vec<(u32, FunctionId, String, Vec<String>, bool, Option<u32>)> {
     let mut edges: Vec<_> = cg.edges_from(fid)
         .into_iter()
         .filter_map(|e| {
             if let CallResolution::Resolved { target } = &e.callee {
-                Some((e.call_site_order, target.clone(), e.callee_text.clone(), e.arg_texts.clone(), e.branchy))
+                Some((
+                    e.call_site_order,
+                    target.clone(),
+                    e.callee_text.clone(),
+                    e.arg_texts.clone(),
+                    e.branchy,
+                    e.branch_id,
+                ))
             } else {
                 None
             }
         })
         .collect();
-    edges.sort_by_key(|(order, _, _, _, _)| *order);
+    edges.sort_by_key(|(order, _, _, _, _, _)| *order);
     edges
 }
 
@@ -454,6 +514,114 @@ fn summarize_fragility(steps: &[FlowStep]) -> FragilitySummary {
     }
 }
 
+// ── call-graph relationship export ────────────────────────────────────────────
+
+/// A single function node in the exported call graph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallGraphNode {
+    pub id: FunctionId,
+    pub label: String,
+    pub module: NodeId,
+    pub module_path: String,
+    pub exported: bool,
+}
+
+/// A directed call relationship between two functions.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallGraphEdge {
+    pub from: FunctionId,
+    pub to: FunctionId,
+    /// Number of individual call-sites that map to this (from, to) pair.
+    pub call_count: u32,
+    /// True if at least one call-site is inside a conditional/loop.
+    pub branchy: bool,
+}
+
+/// Repo-level call graph returned by GET /api/callgraph.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CallGraphReport {
+    pub nodes: Vec<CallGraphNode>,
+    pub edges: Vec<CallGraphEdge>,
+    pub resolved_calls: usize,
+    pub unresolved_calls: usize,
+}
+
+/// Build a full function-level call graph report for the repo.
+///
+/// Re-uses the same extraction pipeline as `compute_flows_full` without the
+/// DFS walk — every resolved edge is emitted, deduped by `(from, to)` pair.
+pub fn build_call_graph_report(model: &Model, root: &Path) -> CallGraphReport {
+    let mut file_data: Vec<FileData> = Vec::new();
+    for module in &model.modules {
+        if !module.is_file {
+            continue;
+        }
+        let abs = root.join(&module.path);
+        let source = match std::fs::read_to_string(&abs) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let functions = extract_functions(&module.path, &source).unwrap_or_default();
+        let bindings = extract_import_bindings(&module.path, &source).unwrap_or_default();
+        file_data.push(FileData {
+            module_id: module.id,
+            path: module.path.clone(),
+            functions,
+            bindings,
+        });
+    }
+
+    let cg = build_call_graph(root, &file_data, model);
+
+    let nodes: Vec<CallGraphNode> = cg
+        .functions
+        .values()
+        .map(|f| CallGraphNode {
+            id: f.id.clone(),
+            label: f.display_name.clone(),
+            module: f.module,
+            module_path: f.module_path.clone(),
+            exported: f.exported,
+        })
+        .collect();
+
+    // Dedup (from, to) pairs; accumulate call_count and branchy flag.
+    let mut edge_map: HashMap<(FunctionId, FunctionId), (u32, bool)> = HashMap::new();
+    let mut resolved = 0usize;
+    let mut unresolved = 0usize;
+
+    for edge in &cg.edges {
+        if let CallResolution::Resolved { target } = &edge.callee {
+            resolved += 1;
+            let key = (edge.caller.clone(), target.clone());
+            let entry = edge_map.entry(key).or_insert((0, false));
+            entry.0 += 1;
+            if edge.branchy {
+                entry.1 = true;
+            }
+        } else {
+            unresolved += 1;
+        }
+    }
+
+    let edges: Vec<CallGraphEdge> = edge_map
+        .into_iter()
+        .map(|((from, to), (call_count, branchy))| CallGraphEdge {
+            from,
+            to,
+            call_count,
+            branchy,
+        })
+        .collect();
+
+    CallGraphReport {
+        nodes,
+        edges,
+        resolved_calls: resolved,
+        unresolved_calls: unresolved,
+    }
+}
+
 // ── second pass: enrich flow steps with real contract shapes ─────────────────
 // We build a raw function map AFTER constructing CallGraph to populate params/return.
 
@@ -462,6 +630,7 @@ pub fn compute_flows_full(
     root: &Path,
     violations: &[Violation],
     changed_paths: &HashSet<String>,
+    features: &[FeatureDecl],
 ) -> FullFlowsReport {
     // ── 1. Re-extract per-file function data ─────────────────────────────────
     let mut file_data: Vec<FileData> = Vec::new();
@@ -518,13 +687,13 @@ pub fn compute_flows_full(
         .collect();
 
     // ── 5. Entry points ──────────────────────────────────────────────────────
-    let entries = detect_entry_points(&cg, model, &file_data);
+    let entries = detect_entry_points(&cg, model, &file_data, features);
 
     // ── 6. Walk flows with proper contract shapes ────────────────────────────
     let mut flows: Vec<Flow> = Vec::new();
 
-    for (entry_id, kind) in entries.into_iter().take(MAX_FLOWS) {
-        let flow = derive_flow_with_contracts(
+    for (entry_id, kind, declared, feature_name) in entries.into_iter().take(MAX_FLOWS) {
+        let mut flow = derive_flow_with_contracts(
             &entry_id,
             &kind,
             &cg,
@@ -535,6 +704,8 @@ pub fn compute_flows_full(
             &module_import_maps,
             &raw_fn_map,
         );
+        flow.declared = declared;
+        flow.feature_name = feature_name;
         flows.push(flow);
     }
 
@@ -552,6 +723,8 @@ pub fn compute_flows_full(
         kind: format!("{:?}", f.kind).to_lowercase(),
         step_count: f.steps.len() as u32,
         fragility_summary: f.fragility_summary.clone(),
+        declared: f.declared,
+        feature_name: f.feature_name.clone(),
     }).collect();
 
     FullFlowsReport {
@@ -590,16 +763,23 @@ fn derive_flow_with_contracts(
     visited.insert(entry.clone());
     let mut truncated = false;
 
-    // Stack: (caller_id, remaining_edges, depth)
-    let mut stack: Vec<(FunctionId, Vec<(u32, FunctionId, String, Vec<String>, bool)>, u32)> = Vec::new();
-    stack.push((entry.clone(), sorted_resolved_edges(cg, entry), 0));
+    // Stack: (caller_id, remaining_edges, depth, parent_step_id)
+    // `parent_step_id` is the `id` field of the step that descended into this caller.
+    type EdgeVec = Vec<(u32, FunctionId, String, Vec<String>, bool, Option<u32>)>;
+    let mut stack: Vec<(FunctionId, EdgeVec, u32, Option<u32>)> = Vec::new();
+    stack.push((entry.clone(), sorted_resolved_edges(cg, entry), 0, None));
 
-    while let Some((caller_id, mut remaining, depth)) = stack.pop() {
-        if remaining.is_empty() { continue; }
+    while let Some((caller_id, mut remaining, depth, parent_id)) = stack.pop() {
+        if remaining.is_empty() {
+            continue;
+        }
 
-        let (call_order, callee_id, callee_text, arg_texts, branchy) = remaining.remove(0);
+        let (call_order, callee_id, callee_text, arg_texts, branchy, branch_id) =
+            remaining.remove(0);
+
         if !remaining.is_empty() {
-            stack.push((caller_id.clone(), remaining, depth));
+            // Re-push the caller's remaining siblings before descending.
+            stack.push((caller_id.clone(), remaining, depth, parent_id));
         }
 
         if steps.len() as u32 >= MAX_STEPS {
@@ -609,12 +789,21 @@ fn derive_flow_with_contracts(
 
         let is_recursion = visited.contains(&callee_id);
 
-        // Build contract shapes from raw function data
-        let (params, return_shape) = if let Some(rf) = raw_fn_map.get(&(callee_id.module, callee_id.name.clone(), callee_id.order)) {
-            let callee_module_path = cg.functions.get(&callee_id)
+        // Build contract shapes from raw function data.
+        let (params, return_shape) = if let Some(rf) = raw_fn_map
+            .get(&(callee_id.module, callee_id.name.clone(), callee_id.order))
+        {
+            let callee_module_path = cg
+                .functions
+                .get(&callee_id)
                 .map(|f| f.module_path.as_str())
                 .unwrap_or("");
-            build_contract_shapes_from_raw(rf, callee_module_path, module_type_tables, module_import_maps)
+            build_contract_shapes_from_raw(
+                rf,
+                callee_module_path,
+                module_type_tables,
+                module_import_maps,
+            )
         } else {
             (vec![], TypeShape::Unknown { raw: String::new() })
         };
@@ -630,7 +819,25 @@ fn derive_flow_with_contracts(
             changed_paths,
         );
 
+        let step_id = steps.len() as u32;
+
+        // `branch_group`: encode as (caller_function_hash, branch_id) so calls
+        // that share the same enclosing block inside the same caller get the same
+        // opaque group number, while different callers or different blocks differ.
+        let branch_group: Option<u32> = branch_id.map(|bid| {
+            use std::collections::hash_map::DefaultHasher;
+            use std::hash::{Hash, Hasher};
+            let mut h = DefaultHasher::new();
+            caller_id.module.hash(&mut h);
+            caller_id.name.hash(&mut h);
+            bid.hash(&mut h);
+            (h.finish() & 0xffff_ffff) as u32
+        });
+
         steps.push(FlowStep {
+            id: step_id,
+            parent: parent_id,
+            branch_group,
             from: caller_id.clone(),
             to: callee_id.clone(),
             call_site_order: call_order,
@@ -648,7 +855,8 @@ fn derive_flow_with_contracts(
             visited.insert(callee_id.clone());
             let callee_edges = sorted_resolved_edges(cg, &callee_id);
             if !callee_edges.is_empty() {
-                stack.push((callee_id, callee_edges, depth + 1));
+                // Descend: the new frames' parent is this step.
+                stack.push((callee_id, callee_edges, depth + 1, Some(step_id)));
             }
         }
     }
@@ -664,6 +872,8 @@ fn derive_flow_with_contracts(
         steps,
         fragility_summary,
         truncated,
+        declared: false,
+        feature_name: None,
     }
 }
 
@@ -676,11 +886,16 @@ fn make_empty_flow(entry: &FunctionId, kind: &FlowKind) -> Flow {
         kind: kind.clone(),
         steps: vec![],
         fragility_summary: FragilitySummary {
-            total_steps: 0, fragile_steps: 0,
-            metric_flags: 0, type_flags: 0, churn_flags: 0,
+            total_steps: 0,
+            fragile_steps: 0,
+            metric_flags: 0,
+            type_flags: 0,
+            churn_flags: 0,
             max_severity: None,
         },
         truncated: false,
+        declared: false,
+        feature_name: None,
     }
 }
 

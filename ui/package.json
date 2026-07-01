@@ -9,6 +9,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@dagrejs/dagre": "^3.0.0",
+    "@types/dagre": "^0.7.54",
     "d3": "^7.9.0",
     "lucide-react": "^0.400.0",
     "react": "^18.3.1",

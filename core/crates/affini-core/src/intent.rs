@@ -15,6 +15,28 @@ pub struct IntentFile {
     pub boundaries: HashMap<String, Vec<String>>,
     #[serde(default)]
     pub rules: Rules,
+    /// Explicitly declared feature entry-points (optional).
+    /// Syntax in affini.toml:
+    /// ```toml
+    /// [[features]]
+    /// name  = "User signup"
+    /// entry = "src/routes/auth.ts#handleSignup"
+    /// kind  = "route"   # optional
+    /// ```
+    #[serde(default)]
+    pub features: Vec<FeatureDecl>,
+}
+
+/// A user-declared feature entry-point in affini.toml.
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeatureDecl {
+    /// Display name for the feature (e.g. "User signup").
+    pub name: String,
+    /// "<relative-path>#<function-name>" pointing at the feature's entry function.
+    pub entry: String,
+    /// Optional kind override (route | cli | handler | public_api | exported_entry).
+    #[serde(default)]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]

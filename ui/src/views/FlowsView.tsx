@@ -209,14 +209,30 @@ export default function FlowsView() {
                 padding: '8px 14px',
                 cursor: 'pointer',
                 background: selectedId === s.id ? 'rgba(99,102,241,0.12)' : 'transparent',
+                borderLeft: selectedId === s.id
+                  ? '2px solid var(--accent)'
+                  : s.declared ? '2px solid #34d399' : '2px solid transparent',
                 transition: 'background 0.1s',
               }}
             >
               <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 3 }}>
                 <span style={{ fontWeight: 600, fontSize: 12, flex: 1, overflow: 'hidden',
-                  textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
-                  {s.name}
+                  textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}
+                  title={s.feature_name ?? s.name}>
+                  {s.feature_name ?? s.name}
                 </span>
+                {s.declared && (
+                  <span title="Declared in affini.toml [[features]]" style={{
+                    fontSize: 9, fontWeight: 700,
+                    color: '#34d399',
+                    background: 'rgba(52,211,153,0.15)',
+                    border: '1px solid rgba(52,211,153,0.4)',
+                    padding: '1px 4px', borderRadius: 4,
+                    flexShrink: 0,
+                  }}>
+                    ✓ declared
+                  </span>
+                )}
                 <span style={{
                   fontSize: 10, fontWeight: 600,
                   color: kindColor(s.kind),
