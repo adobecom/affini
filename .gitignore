@@ -8,6 +8,10 @@ dist/
 # Affini local cache
 .affini/
 
+# Env files (e.g. ANTHROPIC_API_KEY) — never commit secrets
+.env
+.env.*
+
 # Editors
 .DS_Store
 *.swp
