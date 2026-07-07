@@ -265,8 +265,12 @@ function DirRow({
           affini.toml
         </span>
       )}
-      {/* Navigate arrow (single click selects, double click navigates — this button navigates on single click) */}
+      {/* Navigate arrow (single click selects, double click navigates — this button navigates on single click).
+          tabIndex={-1}: the row itself is already a keyboard-focusable role="button"
+          whose Enter key does the same "navigate" action, so this stays mouse-only
+          rather than adding a second, redundant tab stop per row. */}
       <button
+        tabIndex={-1}
         onClick={e => { e.stopPropagation(); onNavigate() }}
         title="Open folder"
         style={{
