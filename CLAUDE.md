@@ -40,11 +40,18 @@ npm run ui                     # or: cd ui && npm run dev
 
 # Rust tests
 cd core && cargo test --workspace
+
+# UI tests
+cd ui && npm test
 ```
 
 `affini-core` has a `cargo test` unit test suite (parsing, resolution, intent checks,
-type-shape normalization, snapshot round-trips). `affini-cli` (the HTTP layer) has no
-automated tests yet.
+type-shape normalization, snapshot round-trips). `affini-cli` has a handful of
+router-level integration tests (`build_router` exercised via `tower::ServiceExt::oneshot`
+— CORS, the `fs_root` sandbox, and the bearer-token gate) but no per-handler unit tests.
+`ui/` has Vitest coverage for pure-logic modules (`dagreLayout`, `edgePath`, `layers`,
+`flowLayout`) but no component/DOM tests yet. `.github/workflows/ci.yml` runs
+`cargo build`/`test`/`clippy -D warnings` and the UI test+build on every push/PR.
 
 ## Architecture
 

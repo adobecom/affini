@@ -129,8 +129,12 @@ export function computeFlowLayout(flow: Flow): FlowLayout {
   for (const step of steps) {
     const k   = stepNodeKey(step.id)
     const pos = g.node(k) as { x: number; y: number } | undefined
-    // Self-loops: place next to their parent if dagre didn't give them a position
-    if (!pos) {
+    // Self-loops get no dagre edge (dagre can't lay out self-loops), but they
+    // still get a `setNode` call above, so dagre *does* give them a position —
+    // just an arbitrary disconnected one, not "next to the parent" as intended.
+    // Force the parent-relative fallback for recursion steps explicitly rather
+    // than relying on `pos` being undefined (it never is).
+    if (!pos || step.recursion) {
       const parentKey = step.parent === null ? ENTRY_KEY : stepNodeKey(step.parent)
       const parentPos = nodes.get(parentKey)
       nodes.set(k, {

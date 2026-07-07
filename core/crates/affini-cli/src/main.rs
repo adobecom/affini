@@ -314,27 +314,10 @@ impl AppState {
     }
 }
 
-async fn cmd_serve(
-    path: &Path,
-    port: u16,
-    intent_path: Option<&Path>,
-    token: Option<String>,
-) -> Result<()> {
-    let canonical = path.canonicalize()?;
-    // Sandbox ceiling = parent of the launch path (allows browsing siblings).
-    let fs_root = canonical.parent().unwrap_or(&canonical).to_path_buf();
-
-    let token = token
-        .or_else(|| std::env::var("AFFINI_TOKEN").ok())
-        .filter(|v| !v.is_empty());
-
-    let state = AppState {
-        root: Arc::new(RwLock::new(canonical)),
-        intent_path: Arc::new(RwLock::new(intent_path.map(|p| p.to_path_buf()))),
-        fs_root,
-        token: token.clone(),
-    };
-
+/// Builds the full Axum app (routes + CORS + optional static UI fallback).
+/// Pulled out of `cmd_serve` so it can be exercised directly in tests
+/// without binding a real TCP listener.
+fn build_router(state: AppState, port: u16, dist_dir: Option<&Path>) -> Router {
     // Restrict to the known dev/prod origins rather than reflecting `Any` —
     // an open CORS policy on a localhost server lets any webpage a developer
     // has open read the repo graph or drive mutating routes.
@@ -372,14 +355,38 @@ async fn cmd_serve(
     // release build of this binary works standalone without a separate Vite
     // process. In dev (no ui/dist next to the binary, e.g. running via
     // `cargo run`), this is a no-op and only the /api/* routes exist.
-    let dist_dir = ui_dist_dir();
-    let app = match &dist_dir {
+    match dist_dir {
         Some(dist) => {
             let index = dist.join("index.html");
             app.fallback_service(ServeDir::new(dist).fallback(ServeFile::new(index)))
         }
         None => app,
+    }
+}
+
+async fn cmd_serve(
+    path: &Path,
+    port: u16,
+    intent_path: Option<&Path>,
+    token: Option<String>,
+) -> Result<()> {
+    let canonical = path.canonicalize()?;
+    // Sandbox ceiling = parent of the launch path (allows browsing siblings).
+    let fs_root = canonical.parent().unwrap_or(&canonical).to_path_buf();
+
+    let token = token
+        .or_else(|| std::env::var("AFFINI_TOKEN").ok())
+        .filter(|v| !v.is_empty());
+
+    let state = AppState {
+        root: Arc::new(RwLock::new(canonical)),
+        intent_path: Arc::new(RwLock::new(intent_path.map(|p| p.to_path_buf()))),
+        fs_root,
+        token: token.clone(),
     };
+
+    let dist_dir = ui_dist_dir();
+    let app = build_router(state, port, dist_dir.as_deref());
 
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
     eprintln!("affini serving on http://{addr}");
@@ -1067,4 +1074,155 @@ fn check_auth(s: &AppState, headers: &HeaderMap) -> Option<axum::response::Respo
 
 fn err500(e: impl std::fmt::Display) -> axum::response::Response {
     (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// Integration tests — exercise the real router via `build_router`, no TCP.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use axum::body::Body;
+    use axum::http::Request;
+    use tower::ServiceExt;
+
+    fn test_state(token: Option<&str>) -> (AppState, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        // Canonicalize like `cmd_serve` does — on macOS, tempdir() paths live
+        // under a symlink (/var → /private/var), and the sandbox check
+        // compares canonicalized paths, so an uncanonicalized fs_root here
+        // would never match and every request would spuriously 403.
+        let root = dir.path().canonicalize().unwrap();
+        let state = AppState {
+            root: Arc::new(RwLock::new(root.clone())),
+            intent_path: Arc::new(RwLock::new(None)),
+            fs_root: root,
+            token: token.map(|s| s.to_string()),
+        };
+        (state, dir)
+    }
+
+    #[tokio::test]
+    async fn cors_reflects_allowed_origin_only() {
+        let (state, _dir) = test_state(None);
+        let app = build_router(state, 7070, None);
+
+        let allowed = Request::builder()
+            .uri("/api/ai/status")
+            .header("origin", "http://localhost:5173")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(allowed).await.unwrap();
+        assert_eq!(
+            res.headers()
+                .get("access-control-allow-origin")
+                .and_then(|v| v.to_str().ok()),
+            Some("http://localhost:5173"),
+        );
+
+        let disallowed = Request::builder()
+            .uri("/api/ai/status")
+            .header("origin", "http://evil.example")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(disallowed).await.unwrap();
+        assert!(res.headers().get("access-control-allow-origin").is_none());
+    }
+
+    #[tokio::test]
+    async fn fs_list_rejects_paths_outside_sandbox() {
+        let (state, dir) = test_state(None);
+        let fs_root = dir.path().to_path_buf();
+        let app = build_router(state, 7070, None);
+
+        // Within the sandbox (fs_root itself) → 200.
+        let ok_req = Request::builder()
+            .uri(format!("/api/fs/list?path={}", fs_root.display()))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.clone().oneshot(ok_req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+
+        // Outside the sandbox (fs_root's parent) → 403.
+        let outside = fs_root.parent().unwrap();
+        let bad_req = Request::builder()
+            .uri(format!("/api/fs/list?path={}", outside.display()))
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(bad_req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn set_root_rejects_paths_outside_sandbox() {
+        let (state, dir) = test_state(None);
+        let fs_root = dir.path().to_path_buf();
+        let app = build_router(state, 7070, None);
+
+        let outside = fs_root.parent().unwrap();
+        let body = serde_json::json!({ "path": outside.display().to_string() }).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/root")
+            .header("content-type", "application/json")
+            .body(Body::from(body))
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn token_gate_blocks_unauthenticated_requests() {
+        let (state, dir) = test_state(Some("s3cr3t"));
+        let fs_root = dir.path().to_path_buf();
+        let app = build_router(state, 7070, None);
+
+        let body = || Body::from(serde_json::json!({ "path": fs_root.display().to_string() }).to_string());
+
+        // No Authorization header → 401, never reaches the sandbox check.
+        let no_auth = Request::builder()
+            .method("POST")
+            .uri("/api/root")
+            .header("content-type", "application/json")
+            .body(body())
+            .unwrap();
+        let res = app.clone().oneshot(no_auth).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        // Wrong token → 401.
+        let wrong_token = Request::builder()
+            .method("POST")
+            .uri("/api/root")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer nope")
+            .body(body())
+            .unwrap();
+        let res = app.clone().oneshot(wrong_token).await.unwrap();
+        assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
+
+        // Correct token → passes the auth gate (200, since the path is in-sandbox).
+        let correct_token = Request::builder()
+            .method("POST")
+            .uri("/api/root")
+            .header("content-type", "application/json")
+            .header("authorization", "Bearer s3cr3t")
+            .body(body())
+            .unwrap();
+        let res = app.oneshot(correct_token).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn unguarded_routes_work_without_a_token_when_none_is_configured() {
+        let (state, _dir) = test_state(None);
+        let app = build_router(state, 7070, None);
+
+        let req = Request::builder()
+            .uri("/api/ai/status")
+            .body(Body::empty())
+            .unwrap();
+        let res = app.oneshot(req).await.unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+    }
 }
