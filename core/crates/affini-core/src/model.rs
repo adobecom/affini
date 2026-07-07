@@ -3,15 +3,18 @@ use std::collections::HashMap;
 
 pub type NodeId = u32;
 
-/// A logical module — a file or a directory treated as a unit.
+/// A logical module — currently always a single scanned source file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Module {
     pub id: NodeId,
     /// Relative path from repo root (e.g. "src/main/services").
     pub path: String,
-    /// True when this is a single file (leaf); false for a directory group.
+    /// Always `true` today. Reserved for a future directory-grouping feature
+    /// (`rollup.rs` currently produces its own `GroupNode` type for that
+    /// instead of directory-level `Module`s) — no code path sets this `false`.
     pub is_file: bool,
-    /// Exported symbol names collected from this file/directory (best-effort).
+    /// Always empty today. Reserved for a future export-tracking feature —
+    /// no code path currently populates this.
     pub exports: Vec<String>,
 }
 

@@ -137,6 +137,37 @@ pub fn check(model: &Model, intent: &IntentFile) -> Vec<Violation> {
         }
     }
 
+    // --- canonical rules ---
+    // A canonical rule declares a single authoritative file for a concept
+    // (glob). If more than one module matches the concept's glob, every
+    // match other than the declared canonical `path` is flagged as a
+    // competing/duplicate implementation.
+    for rule in &intent.rules.canonical {
+        let matches: Vec<&str> = model
+            .modules
+            .iter()
+            .map(|m| m.path.as_str())
+            .filter(|p| glob_match(&rule.concept, p))
+            .collect();
+
+        if matches.len() > 1 {
+            for &path in &matches {
+                if path != rule.path {
+                    violations.push(Violation {
+                        rule: format!("canonical: {}", rule.concept),
+                        severity: Severity::Warning,
+                        from_path: path.to_string(),
+                        to_path: rule.path.clone(),
+                        message: format!(
+                            "'{}' matches the '{}' concept, which already has a canonical implementation at '{}'",
+                            path, rule.concept, rule.path
+                        ),
+                    });
+                }
+            }
+        }
+    }
+
     // --- layer rules ---
     // Layers are ordered: layers[0] is lowest. A module in a higher layer
     // must not be imported by a module in a lower layer.
@@ -304,6 +335,7 @@ mod tests {
                 forbidden: vec![],
                 canonical: vec![],
             },
+            features: vec![],
         }
     }
 
@@ -497,5 +529,49 @@ mod tests {
         );
         let violations = check(&model, &intent);
         assert!(violations.is_empty());
+    }
+
+    // ── canonical rules ────────────────────────────────────────────────────────
+
+    fn make_intent_with_canonical(canonical: Vec<CanonicalRule>) -> IntentFile {
+        IntentFile {
+            boundaries: HashMap::new(),
+            rules: Rules { layers: vec![], forbidden: vec![], canonical },
+            features: vec![],
+        }
+    }
+
+    #[test]
+    fn canonical_duplicate_implementations_flagged() {
+        let model = Model {
+            modules: vec![
+                make_module(1, "src/utils/date.ts"),
+                make_module(2, "src/legacy/date-helpers.ts"),
+                make_module(3, "src/unrelated.ts"),
+            ],
+            ..Default::default()
+        };
+        let intent = make_intent_with_canonical(vec![CanonicalRule {
+            concept: "src/*/date*.ts".to_string(),
+            path: "src/utils/date.ts".to_string(),
+        }]);
+        let violations = check(&model, &intent);
+        assert_eq!(violations.len(), 1);
+        assert_eq!(violations[0].from_path, "src/legacy/date-helpers.ts");
+        assert_eq!(violations[0].to_path, "src/utils/date.ts");
+        assert_eq!(violations[0].severity, Severity::Warning);
+    }
+
+    #[test]
+    fn canonical_single_match_is_ok() {
+        let model = Model {
+            modules: vec![make_module(1, "src/utils/date.ts")],
+            ..Default::default()
+        };
+        let intent = make_intent_with_canonical(vec![CanonicalRule {
+            concept: "src/*/date*.ts".to_string(),
+            path: "src/utils/date.ts".to_string(),
+        }]);
+        assert!(check(&model, &intent).is_empty());
     }
 }

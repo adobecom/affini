@@ -4,10 +4,13 @@
 /// call-site falls back gracefully — no Cargo feature flag, no rebuild needed.
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::sync::OnceLock;
+use std::time::Duration;
 
-const MODEL: &str = "claude-sonnet-4-6";
+const DEFAULT_MODEL: &str = "claude-sonnet-4-6";
 const API_URL: &str = "https://api.anthropic.com/v1/messages";
 const ANTHROPIC_VERSION: &str = "2023-06-01";
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 // ── key helper ────────────────────────────────────────────────────────────────
 
@@ -16,6 +19,26 @@ pub fn api_key() -> Option<String> {
     std::env::var("ANTHROPIC_API_KEY")
         .ok()
         .filter(|v| !v.is_empty())
+}
+
+/// Model id, overridable via `ANTHROPIC_MODEL` without a rebuild.
+fn model() -> String {
+    std::env::var("ANTHROPIC_MODEL")
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| DEFAULT_MODEL.to_string())
+}
+
+/// A single shared HTTP client (connection pooling + a real timeout),
+/// built once on first use rather than per-request.
+fn client() -> &'static reqwest::Client {
+    static CLIENT: OnceLock<reqwest::Client> = OnceLock::new();
+    CLIENT.get_or_init(|| {
+        reqwest::Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .build()
+            .expect("failed to build reqwest client")
+    })
 }
 
 // ── Messages API wire types ───────────────────────────────────────────────────
@@ -28,7 +51,7 @@ struct Message {
 
 #[derive(Serialize)]
 struct Request {
-    model: &'static str,
+    model: String,
     max_tokens: u32,
     system: String,
     messages: Vec<Message>,
@@ -93,7 +116,7 @@ pub async fn explain_flow(flow_json: &str) -> Result<String> {
     let key = api_key().context("ANTHROPIC_API_KEY not set")?;
 
     let body = Request {
-        model: MODEL,
+        model: model(),
         max_tokens: 1024,
         system: SYSTEM_PROMPT.to_string(),
         messages: vec![Message {
@@ -104,8 +127,7 @@ pub async fn explain_flow(flow_json: &str) -> Result<String> {
         }],
     };
 
-    let client = reqwest::Client::new();
-    let res = client
+    let res = client()
         .post(API_URL)
         .header("x-api-key", &key)
         .header("anthropic-version", ANTHROPIC_VERSION)

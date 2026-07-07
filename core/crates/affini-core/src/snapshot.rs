@@ -75,7 +75,7 @@ impl SnapshotStore {
     /// List saved snapshot labels, newest-first (for the snapshots index endpoint).
     pub fn list(&self) -> Result<Vec<String>> {
         let mut entries = self.read_snapshot_entries()?;
-        entries.sort_by(|a, b| b.saved_at_unix.cmp(&a.saved_at_unix));
+        entries.sort_by_key(|e| std::cmp::Reverse(e.saved_at_unix));
         Ok(entries.into_iter().map(|e| e.label).collect())
     }
 

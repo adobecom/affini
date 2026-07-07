@@ -257,10 +257,10 @@ fn classify_entry(name: &str, path: &str) -> FlowKind {
     FlowKind::ExportedEntry
 }
 
-fn sorted_resolved_edges(
-    cg: &CallGraph,
-    fid: &FunctionId,
-) -> Vec<(u32, FunctionId, String, Vec<String>, bool, Option<u32>)> {
+/// (call_site_order, target, callee_text, arg_texts, branchy, branch_id)
+type ResolvedEdge = (u32, FunctionId, String, Vec<String>, bool, Option<u32>);
+
+fn sorted_resolved_edges(cg: &CallGraph, fid: &FunctionId) -> Vec<ResolvedEdge> {
     let mut edges: Vec<_> = cg.edges_from(fid)
         .into_iter()
         .filter_map(|e| {
@@ -295,7 +295,7 @@ fn derive_flow_name(f: &crate::callgraph::Function) -> String {
     // Convert camelCase / PascalCase / snake_case to human readable
     let name = &f.display_name;
     // Strip class prefix for methods
-    let short = name.split('.').last().unwrap_or(name);
+    let short = name.split('.').next_back().unwrap_or(name);
     camel_to_words(short)
 }
 
@@ -363,6 +363,10 @@ fn build_contract_shapes_from_raw(
 
 // ── fragility computation ─────────────────────────────────────────────────────
 
+// Each parameter is independently-computed context needed for fragility
+// scoring; bundling them into a struct would just move the same 8 fields
+// one level up without reducing complexity.
+#[allow(clippy::too_many_arguments)]
 fn compute_fragility(
     caller_id: &FunctionId,
     callee_id: &FunctionId,
@@ -739,6 +743,9 @@ pub fn compute_flows_full(
     }
 }
 
+// Same rationale as `compute_fragility` above — every argument is distinct
+// per-scan context, not a natural struct.
+#[allow(clippy::too_many_arguments)]
 fn derive_flow_with_contracts(
     entry: &FunctionId,
     kind: &FlowKind,

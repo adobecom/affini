@@ -103,7 +103,7 @@ fn extract_type_decls_inner(source: &str, table: &mut TypeTable) {
 fn type_alias_name(line: &str) -> String {
     // `type Foo = ...` or `type Foo<T> = ...`
     let rest = line.trim_start_matches("type").trim();
-    rest.split(|c| c == '=' || c == '<' || c == ' ')
+    rest.split(['=', '<', ' '])
         .next()
         .unwrap_or("")
         .trim()
@@ -139,7 +139,6 @@ fn collect_type_body_alias(line: &str, lines: &[&str], i: &mut usize) -> Option<
 
 fn collect_interface_body(first_line: &str, lines: &[&str], i: &mut usize) -> Option<String> {
     // Collect everything between `{` ... `}`.
-    let start_brace = first_line.find('{');
     let mut depth = 0i32;
     let mut body = String::new();
 
@@ -149,15 +148,22 @@ fn collect_interface_body(first_line: &str, lines: &[&str], i: &mut usize) -> Op
     while j < lines.len() {
         let line_text = if j == start_line { first_line } else { lines[j].trim() };
         for ch in line_text.chars() {
-            if ch == '{' { depth += 1; }
-            if ch == '}' {
+            if ch == '{' {
+                // Only push braces that are nested *inside* the outermost
+                // pair — the outer opening brace itself is a delimiter, not
+                // body content.
+                if depth > 0 {
+                    body.push(ch);
+                }
+                depth += 1;
+            } else if ch == '}' {
                 depth -= 1;
                 if depth == 0 {
                     *i = j + 1;
                     return Some(body.trim().to_string());
                 }
-            }
-            if depth > 0 {
+                body.push(ch);
+            } else if depth > 0 {
                 body.push(ch);
             }
         }
@@ -165,7 +171,6 @@ fn collect_interface_body(first_line: &str, lines: &[&str], i: &mut usize) -> Op
         j += 1;
     }
 
-    let _ = start_brace;
     None
 }
 
@@ -254,8 +259,7 @@ fn parse_type(t: &str, ctx: &NormCtx) -> TypeShape {
     }
 
     // Array shorthand: T[]
-    if t.ends_with("[]") {
-        let inner = &t[..t.len() - 2];
+    if let Some(inner) = t.strip_suffix("[]") {
         return TypeShape::Array { of: Box::new(parse_type(inner, ctx)) };
     }
 
@@ -415,7 +419,6 @@ fn split_object_members(body: &str) -> Vec<&str> {
     let mut parts = Vec::new();
     let mut depth = 0i32;
     let mut start = 0;
-    let bytes = body.as_bytes();
 
     let mut i = 0;
     while i < body.len() {
@@ -433,7 +436,6 @@ fn split_object_members(body: &str) -> Vec<&str> {
             _ => {}
         }
         i += c.len_utf8();
-        let _ = bytes;
     }
 
     let last = &body[start..];

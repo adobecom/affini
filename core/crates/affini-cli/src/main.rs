@@ -13,7 +13,7 @@ use affini_core::{
 use anyhow::{bail, Context, Result};
 use axum::{
     extract::{Path as AxumPath, Query as AxumQuery, State},
-    http::StatusCode,
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{IntoResponse, Json},
     routing::{get, post},
     Router,
@@ -26,7 +26,8 @@ use std::{
     sync::{Arc, RwLock},
 };
 use tokio::net::TcpListener;
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
+use tower_http::services::{ServeDir, ServeFile};
 
 // ---------------------------------------------------------------------------
 // CLI definition
@@ -82,6 +83,12 @@ enum Cmd {
         port: u16,
         #[arg(long)]
         intent: Option<PathBuf>,
+        /// Require this bearer token on mutating/costly routes (POST /api/root,
+        /// POST /api/baseline, POST /api/flows/:id/explain). Falls back to
+        /// AFFINI_TOKEN if unset. When neither is set, those routes are open —
+        /// matches today's behavior.
+        #[arg(long)]
+        token: Option<String>,
     },
     /// Derive feature flows and print the report as JSON.
     Flows {
@@ -115,7 +122,9 @@ async fn run() -> Result<()> {
         Cmd::Diff { a, b, root } => cmd_diff(&a, b.as_deref(), &root).await,
         Cmd::Check { path, intent } => cmd_check(&path, intent.as_deref()).await,
         Cmd::IntentInit { path, output } => cmd_intent_init(&path, &output).await,
-        Cmd::Serve { path, port, intent } => cmd_serve(&path, port, intent.as_deref()).await,
+        Cmd::Serve { path, port, intent, token } => {
+            cmd_serve(&path, port, intent.as_deref(), token).await
+        }
         Cmd::Flows { path, intent, output } => cmd_flows(&path, intent.as_deref(), output.as_deref()).await,
     }
 }
@@ -291,6 +300,8 @@ struct AppState {
     intent_path: Arc<RwLock<Option<PathBuf>>>,
     /// Immutable: the directory that bounds all file-browser operations.
     fs_root: PathBuf,
+    /// If set, mutating/costly routes require `Authorization: Bearer <token>`.
+    token: Option<String>,
 }
 
 impl AppState {
@@ -303,21 +314,39 @@ impl AppState {
     }
 }
 
-async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result<()> {
+async fn cmd_serve(
+    path: &Path,
+    port: u16,
+    intent_path: Option<&Path>,
+    token: Option<String>,
+) -> Result<()> {
     let canonical = path.canonicalize()?;
     // Sandbox ceiling = parent of the launch path (allows browsing siblings).
     let fs_root = canonical.parent().unwrap_or(&canonical).to_path_buf();
+
+    let token = token
+        .or_else(|| std::env::var("AFFINI_TOKEN").ok())
+        .filter(|v| !v.is_empty());
 
     let state = AppState {
         root: Arc::new(RwLock::new(canonical)),
         intent_path: Arc::new(RwLock::new(intent_path.map(|p| p.to_path_buf()))),
         fs_root,
+        token: token.clone(),
     };
 
+    // Restrict to the known dev/prod origins rather than reflecting `Any` —
+    // an open CORS policy on a localhost server lets any webpage a developer
+    // has open read the repo graph or drive mutating routes.
     let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+        .allow_origin([
+            HeaderValue::from_static("http://localhost:5173"),
+            HeaderValue::from_static("http://127.0.0.1:5173"),
+            HeaderValue::from_str(&format!("http://localhost:{port}"))
+                .unwrap_or_else(|_| HeaderValue::from_static("http://localhost:5173")),
+        ])
+        .allow_methods([Method::GET, Method::POST])
+        .allow_headers([header::CONTENT_TYPE, header::AUTHORIZATION]);
 
     let app = Router::new()
         .route("/api/model",        get(handler_model))
@@ -339,9 +368,29 @@ async fn cmd_serve(path: &Path, port: u16, intent_path: Option<&Path>) -> Result
         .layer(cors)
         .with_state(state);
 
+    // Serve the built UI (ui/dist) as a SPA fallback when present, so a
+    // release build of this binary works standalone without a separate Vite
+    // process. In dev (no ui/dist next to the binary, e.g. running via
+    // `cargo run`), this is a no-op and only the /api/* routes exist.
+    let dist_dir = ui_dist_dir();
+    let app = match &dist_dir {
+        Some(dist) => {
+            let index = dist.join("index.html");
+            app.fallback_service(ServeDir::new(dist).fallback(ServeFile::new(index)))
+        }
+        None => app,
+    };
+
     let addr: SocketAddr = format!("127.0.0.1:{port}").parse()?;
     eprintln!("affini serving on http://{addr}");
     eprintln!("  repo: {}", path.display());
+    match &dist_dir {
+        Some(dist) => eprintln!("  ui: serving built UI from {}", dist.display()),
+        None => eprintln!("  ui: not found next to this binary — run `npm run dev` for the Vite dev UI"),
+    }
+    if token.is_some() {
+        eprintln!("  auth: bearer token required for POST /api/root, /api/baseline, /api/flows/:id/explain");
+    }
 
     let listener = TcpListener::bind(addr).await?;
     axum::serve(listener, app).await?;
@@ -548,8 +597,12 @@ struct BaselineBody {
 
 async fn handler_baseline_post(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<BaselineBody>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_auth(&s, &headers) {
+        return resp;
+    }
     let root = s.current_root();
     match SnapshotStore::open(&root) {
         Ok(store) => {
@@ -658,8 +711,12 @@ async fn handler_ai_status() -> impl IntoResponse {
 // POST /api/flows/:id/explain — returns a plain-English risk assessment for a flow.
 async fn handler_flow_explain(
     State(s): State<AppState>,
+    headers: HeaderMap,
     AxumPath(id): AxumPath<String>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_auth(&s, &headers) {
+        return resp;
+    }
     if ai::api_key().is_none() {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -847,8 +904,12 @@ struct SetRootBody {
 
 async fn handler_set_root(
     State(s): State<AppState>,
+    headers: HeaderMap,
     Json(body): Json<SetRootBody>,
 ) -> impl IntoResponse {
+    if let Some(resp) = check_auth(&s, &headers) {
+        return resp;
+    }
     let target = PathBuf::from(&body.path);
     let canonical = match target.canonicalize() {
         Ok(p) => p,
@@ -959,6 +1020,16 @@ async fn cmd_flows(path: &Path, intent_path: Option<&Path>, output: Option<&Path
 // Shared helpers
 // ---------------------------------------------------------------------------
 
+/// Locates `ui/dist` next to this binary's repo (../../../ui/dist relative
+/// to `core/target/release/affini`), returning `None` if it doesn't exist —
+/// e.g. in dev, where the UI is served separately by Vite.
+fn ui_dist_dir() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let repo_root = exe.parent()?.parent()?.parent()?.parent()?; // release/target/core/<root>
+    let dist = repo_root.join("ui").join("dist");
+    dist.join("index.html").is_file().then_some(dist)
+}
+
 fn resolve_intent(s: &AppState) -> PathBuf {
     s.current_intent_path()
         .unwrap_or_else(|| s.current_root().join("affini.toml"))
@@ -970,7 +1041,28 @@ fn load_intent_opt(s: &AppState) -> Option<intent::IntentFile> {
 }
 
 fn json_ok<T: serde::Serialize>(val: T) -> axum::response::Response {
-    (StatusCode::OK, Json(serde_json::to_value(val).unwrap())).into_response()
+    match serde_json::to_value(val) {
+        Ok(v) => (StatusCode::OK, Json(v)).into_response(),
+        Err(e) => err500(e),
+    }
+}
+
+/// Checks the `Authorization: Bearer <token>` header against the configured
+/// server token. Returns `None` (proceed) when no token is configured or the
+/// header matches; returns `Some(401)` otherwise.
+fn check_auth(s: &AppState, headers: &HeaderMap) -> Option<axum::response::Response> {
+    let expected = s.token.as_deref()?;
+    let ok = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(|t| t == expected)
+        .unwrap_or(false);
+    if ok {
+        None
+    } else {
+        Some((StatusCode::UNAUTHORIZED, "missing or invalid bearer token").into_response())
+    }
 }
 
 fn err500(e: impl std::fmt::Display) -> axum::response::Response {
