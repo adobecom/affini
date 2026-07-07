@@ -227,6 +227,9 @@ function DirRow({
 }) {
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-label={`${entry.name}${entry.has_affini ? ' (has affini.toml)' : ''}`}
       style={{
         display: 'flex', alignItems: 'center', gap: 8,
         padding: '6px 8px', borderRadius: 6,
@@ -238,6 +241,10 @@ function DirRow({
       }}
       onClick={onSelect}
       onDoubleClick={onNavigate}
+      onKeyDown={e => {
+        if (e.key === 'Enter') { e.preventDefault(); onNavigate() }
+        else if (e.key === ' ') { e.preventDefault(); onSelect() }
+      }}
     >
       <Folder size={14} color={selected ? 'var(--accent)' : 'var(--text-muted)'} />
       <span style={{

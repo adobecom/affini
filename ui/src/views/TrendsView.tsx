@@ -4,7 +4,7 @@ import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, Legend, ResponsiveContainer,
   ReferenceLine,
 } from 'recharts'
-import { Info, BookOpen } from 'lucide-react'
+import { Info, BookOpen, AlertCircle } from 'lucide-react'
 import { InfoTip } from '../components/InfoTip'
 import { METRIC_HELP } from '../metricHelp'
 
@@ -12,16 +12,18 @@ export default function TrendsView() {
   const [points, setPoints] = useState<TrendPoint[]>([])
   const [baseline, setBaseline] = useState<Baseline | null>(null)
   const [loading, setLoading] = useState(true)
+  const [error, setError] = useState<string | null>(null)
   const [markingRead, setMarkingRead] = useState(false)
 
   const load = useCallback(async () => {
     setLoading(true)
+    setError(null)
     try {
       const [pts, bl] = await Promise.all([fetchTrends(), fetchBaseline()])
       setPoints(pts)
       setBaseline(bl)
     } catch (e) {
-      console.error(e)
+      setError(e instanceof Error ? e.message : String(e))
     } finally {
       setLoading(false)
     }
@@ -59,13 +61,15 @@ export default function TrendsView() {
 
       {loading ? (
         <Placeholder msg="loading…" />
+      ) : error ? (
+        <Status icon={<AlertCircle size={16} color="var(--error)" />} msg={error} />
       ) : points.length <= 1 ? (
         <EmptyTrends />
       ) : (
         <TrendChart points={points} baseline={baseline} />
       )}
 
-      {!loading && current && <CurrentStats point={current} baseline={baseline} />}
+      {!loading && !error && current && <CurrentStats point={current} baseline={baseline} />}
     </div>
   )
 }
@@ -220,6 +224,14 @@ function Metric({ label, value, color = 'var(--accent)', helpKey }: { label: str
 
 function Placeholder({ msg }: { msg: string }) {
   return <div style={{ color: 'var(--text-muted)', padding: '20px 0' }}>{msg}</div>
+}
+
+function Status({ icon, msg }: { icon: React.ReactNode; msg: string }) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8, color: 'var(--text-muted)', fontSize: 13, padding: '20px 0' }}>
+      {icon} {msg}
+    </div>
+  )
 }
 
 function EmptyTrends() {
