@@ -47,13 +47,15 @@ pub fn scan(root: &Path) -> Result<Model> {
     let mut modules: Vec<Module> = Vec::new();
     let mut path_to_id: HashMap<String, NodeId> = HashMap::new();
 
-    for (idx, abs_path) in files.iter().enumerate() {
-        let rel = abs_path
-            .strip_prefix(&root_abs)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
-        let id = idx as NodeId;
+    for abs_path in &files {
+        let rel = match abs_path.strip_prefix(&root_abs) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => continue, // walked path unexpectedly outside root_abs; skip defensively
+        };
+        // `id` must track `modules.len()`, not the position in `files`, so
+        // NodeId stays a gap-free index into `modules` even if entries above
+        // are skipped.
+        let id = modules.len() as NodeId;
         path_to_id.insert(rel.clone(), id);
         modules.push(Module {
             id,
@@ -72,11 +74,10 @@ pub fn scan(root: &Path) -> Result<Model> {
             Ok(s) => s,
             Err(_) => continue,
         };
-        let rel_str = file_abs
-            .strip_prefix(&root_abs)
-            .unwrap()
-            .to_string_lossy()
-            .to_string();
+        let rel_str = match file_abs.strip_prefix(&root_abs) {
+            Ok(p) => p.to_string_lossy().to_string(),
+            Err(_) => continue,
+        };
         let from_id = match path_to_id.get(&rel_str) {
             Some(&id) => id,
             None => continue,
@@ -106,9 +107,12 @@ pub fn scan(root: &Path) -> Result<Model> {
         }
     }
 
-    // Dedup edges (same from/to/kind may appear if a file has multiple imports of the same thing)
+    // Dedup edges that carry the same (from, to, kind) — e.g. a file importing
+    // the same target under two different specifiers. Keep `kind` in the key
+    // so a module that both imports *and* re-exports the same target keeps
+    // both relationships instead of one silently shadowing the other.
     edges.sort_by_key(|e| (e.from, e.to, e.kind == EdgeKind::Reexports));
-    edges.dedup_by_key(|e| (e.from, e.to));
+    edges.dedup_by_key(|e| (e.from, e.to, e.kind.clone()));
 
     // --- compute metrics ---
     let n = modules.len();
@@ -246,10 +250,10 @@ fn tarjan_scc(n: usize, adj: &[Vec<usize>]) -> Vec<(u32, u32)> {
 }
 
 fn is_source_file(p: &Path) -> bool {
-    match p.extension().and_then(|e| e.to_str()) {
-        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs") => true,
-        _ => false,
-    }
+    matches!(
+        p.extension().and_then(|e| e.to_str()),
+        Some("ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs")
+    )
 }
 
 #[cfg(test)]

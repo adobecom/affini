@@ -107,7 +107,7 @@ pub fn build_call_graph(root: &Path, files: &[FileData], model: &Model) -> CallG
                 exported_index.insert((mid, rf.name.clone()), fid.clone());
                 // Method short-name: "UserService.create" → also index as "create"
                 if rf.is_method {
-                    if let Some(short) = rf.name.split('.').last() {
+                    if let Some(short) = rf.name.split('.').next_back() {
                         exported_index
                             .entry((mid, short.to_string()))
                             .or_insert_with(|| fid.clone());

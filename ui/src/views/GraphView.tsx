@@ -313,7 +313,7 @@ export default function GraphView() {
     [model],
   )
 
-  const layerOrder = model?.layer_order ?? []
+  const layerOrder = useMemo(() => model?.layer_order ?? [], [model?.layer_order])
   const layerColors = useMemo(() => buildLayerColors(layerOrder), [layerOrder])
 
   const neighborhood = useMemo<Set<number> | null>(() => {

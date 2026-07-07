@@ -178,7 +178,7 @@ pub fn rollup(
             }
             GroupBy::Scc => {
                 // Singleton SCC: show basename.
-                key.split('/').last().unwrap_or(key).to_string()
+                key.split('/').next_back().unwrap_or(key).to_string()
             }
             _ => key.clone(),
         };
@@ -272,7 +272,7 @@ pub fn rollup(
 
 /// Build a mapping from module path → layer index (0 = most stable).
 /// Only modules present in `model.layers` are included.
-fn build_layer_index<'a>(model: &'a Model) -> HashMap<&'a str, usize> {
+fn build_layer_index(model: &Model) -> HashMap<&str, usize> {
     let mut map: HashMap<&str, usize> = HashMap::new();
     for (id, layer_name) in &model.layers {
         if let Some(idx) = model.layer_order.iter().position(|l| l == layer_name) {

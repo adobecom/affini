@@ -45,6 +45,9 @@ export interface ModuleNodeData {
   height: number
   /** Pre-computed layer color from layers.ts (hex string). */
   layerColor: string
+  /** Keyboard/click activation — selects this node. Optional so ModuleNode
+   *  can still be used in read-only/preview contexts. */
+  onActivate?: () => void
 }
 
 // ─── component ──────────────────────────────────────────────────────────────
@@ -80,13 +83,22 @@ export function ModuleNode({ data }: { data: ModuleNodeData }) {
 
   // Badges — cap at 3
   const badges: React.ReactNode[] = []
-  if (isCycle)        badges.push(<span key="cy" title="Dependency cycle (circular imports)" style={{ color: '#f87171' }}>↻</span>)
-  if (isHub)          badges.push(<span key="hu" title="Hub module — top 10% fan-in" style={{ color: '#fbbf24' }}>★</span>)
-  if (isViolationSrc) badges.push(<span key="vl" title="Architectural violation source" style={{ color: '#f87171' }}>⚠</span>)
-  else if (isDupe)    badges.push(<span key="dp" title="Near-duplicate code cluster" style={{ color: '#8892aa' }}>⎘</span>)
+  if (isCycle)        badges.push(<span key="cy" title="Dependency cycle (circular imports)" aria-label="Dependency cycle" style={{ color: '#f87171' }}>↻</span>)
+  if (isHub)          badges.push(<span key="hu" title="Hub module — top 10% fan-in" aria-label="Hub module" style={{ color: '#fbbf24' }}>★</span>)
+  if (isViolationSrc) badges.push(<span key="vl" title="Architectural violation source" aria-label="Architectural violation" style={{ color: '#f87171' }}>⚠</span>)
+  else if (isDupe)    badges.push(<span key="dp" title="Near-duplicate code cluster" aria-label="Near-duplicate code" style={{ color: '#8892aa' }}>⎘</span>)
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-label={`${m.path}${isSelected ? ' (selected)' : ''}`}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') {
+          e.preventDefault()
+          data.onActivate?.()
+        }
+      }}
       style={{
         background: bg,
         border: `1px ${borderStyle} ${borderColor}`,

@@ -150,7 +150,14 @@ function StepRow({ step, index, active, past, compact, indent, onClick }: RowPro
 
   return (
     <div
+      role="button"
+      tabIndex={0}
+      aria-label={`Step ${index + 1}: ${step.from.name} calls ${step.callee_text || step.to.name}`}
+      aria-current={active}
       onClick={onClick}
+      onKeyDown={e => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onClick() }
+      }}
       style={{
         display: 'flex', alignItems: 'center', gap: 8,
         marginBottom: compact ? 2 : 3,

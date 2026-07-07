@@ -1,5 +1,11 @@
 # affini.toml — architectural intent for the affini repo itself
 # This file is checked in. Edit and ratify to enforce the design.
+#
+# CAVEAT: affini's scanner only parses JS/TS-family source (.ts/.tsx/.js/.jsx/
+# .mjs/.cjs). `core` and `cli` below are entirely Rust, so those two boundaries
+# currently match zero files — the forbidden rules against them are vacuously
+# satisfied, not actually verified. Only the `ui` boundary is meaningfully
+# checked by `affini check` today. See CLAUDE.md's affini.toml section.
 
 [boundaries]
 core = ["core/crates/affini-core/**"]

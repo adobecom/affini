@@ -386,7 +386,7 @@ export function ForceGraph({
               overflow="visible"
               onMouseDown={ev => handleNodeMouseDown(ev, n.id)}
               onClick={ev => handleNodeClick(ev, n.id)}
-              style={{ cursor: layoutMode === 'ranked' ? 'pointer' : 'pointer' }}
+              style={{ cursor: 'pointer' }}
             >
               <ModuleNode
                 data={{
@@ -398,6 +398,7 @@ export function ForceGraph({
                   width: n.width,
                   height: NODE_H,
                   layerColor: layerColor(n.layer, layerColors),
+                  onActivate: () => onNodeClick(n.id),
                 }}
               />
             </foreignObject>

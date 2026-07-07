@@ -98,6 +98,11 @@ export default function FlowsView() {
     return () => {
       if (rafRef.current !== null) cancelAnimationFrame(rafRef.current)
     }
+    // Deliberately depend on `flow?.steps.length`, not `flow` itself: the
+    // ticker should only restart when playback starts/stops or a
+    // different-length flow loads, not on every `flow` object identity
+    // change (e.g. a re-fetch of the same flow after marking baseline).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [playing, flow?.steps.length])
 
   // ── data fetching ─────────────────────────────────────────────────────────
@@ -204,7 +209,14 @@ export default function FlowsView() {
           {summaries.map(s => (
             <div
               key={s.id}
+              role="button"
+              tabIndex={0}
+              aria-label={s.name}
+              aria-current={selectedId === s.id}
               onClick={() => setSelectedId(s.id)}
+              onKeyDown={e => {
+                if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setSelectedId(s.id) }
+              }}
               style={{
                 padding: '8px 14px',
                 cursor: 'pointer',

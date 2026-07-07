@@ -24,12 +24,34 @@ npm run ui                     # or: cd ui && npm run dev
 ./core/target/release/affini scan
 ./core/target/release/affini check
 ./core/target/release/affini serve .
+./core/target/release/affini serve . --port 7070 --token <secret>   # opt-in auth on mutating routes
 
 # Check architectural conformance
 ./core/target/release/affini check --intent affini.toml
+
+# Diff two snapshots (JSON files or snapshot labels)
+./core/target/release/affini diff <a> [b]
+
+# Infer a first-draft affini.toml from the existing module graph
+./core/target/release/affini intent-init
+
+# Derive feature flows and print the report as JSON
+./core/target/release/affini flows
+
+# Rust tests
+cd core && cargo test --workspace
+
+# UI tests
+cd ui && npm test
 ```
 
-There is no test suite.
+`affini-core` has a `cargo test` unit test suite (parsing, resolution, intent checks,
+type-shape normalization, snapshot round-trips). `affini-cli` has a handful of
+router-level integration tests (`build_router` exercised via `tower::ServiceExt::oneshot`
+— CORS, the `fs_root` sandbox, and the bearer-token gate) but no per-handler unit tests.
+`ui/` has Vitest coverage for pure-logic modules (`dagreLayout`, `edgePath`, `layers`,
+`flowLayout`) but no component/DOM tests yet. `.github/workflows/ci.yml` runs
+`cargo build`/`test`/`clippy -D warnings` and the UI test+build on every push/PR.
 
 ## Architecture
 
@@ -44,7 +66,7 @@ Vite dev server (:5173)           (proxies /api → :7070)
   └─ React SPA (ui/src/)
 ```
 
-In production the Vite build output (`ui/dist/`) is served statically. In dev, `npm run dev` runs both processes concurrently via `concurrently`.
+In production, `affini serve` detects `ui/dist/` next to its own binary (i.e. `<repo>/ui/dist`, resolved relative to `core/target/release/affini`) and serves it as a SPA fallback — no separate process needed. In dev, `npm run dev` runs both processes concurrently via `concurrently`, and Vite proxies `/api/*` to the Rust server.
 
 ### Rust workspace (`core/`)
 
@@ -64,7 +86,12 @@ The scan pipeline inside `affini-core`:
 
 ### HTTP API (`affini-cli/src/main.rs`)
 
-All routes share `AppState { root, intent_path }` and re-scan on every request (no in-memory cache).
+All routes share `AppState { root, intent_path, fs_root, token }` and re-scan on every
+request (no in-memory cache). CORS is restricted to the known dev/prod origins
+(`http://localhost:5173`, `http://127.0.0.1:5173`, `http://localhost:<port>`) — not
+wide open. `serve --token <t>` (or `AFFINI_TOKEN`) optionally requires
+`Authorization: Bearer <t>` on the three mutating/costly routes marked 🔒 below; when
+unset, those routes are open (today's default behavior).
 
 | Route | Handler |
 |---|---|
@@ -73,12 +100,16 @@ All routes share `AppState { root, intent_path }` and re-scan on every request (
 | `GET /api/snapshots` | Saved snapshot labels |
 | `GET /api/trends` | Time-series metrics across all snapshots |
 | `GET /api/diff?from=&to=` | Structural diff between two snapshots |
-| `GET /api/baseline` / `POST /api/baseline` | Read/set baseline snapshot |
+| `GET /api/baseline` / `POST /api/baseline` 🔒 | Read/set baseline snapshot |
 | `GET /api/dupes?threshold=` | Structural duplicate clusters |
 | `GET /api/flows` | Flow summaries (all detected feature flows) |
 | `GET /api/flows/:id` | Full flow with step-level fragility detail |
-| `POST /api/flows/:id/explain` | AI risk assessment (requires `ANTHROPIC_API_KEY`) |
+| `POST /api/flows/:id/explain` 🔒 | AI risk assessment (requires `ANTHROPIC_API_KEY`) |
 | `GET /api/ai/status` | Whether AI is available |
+| `GET /api/graph/grouped?by=&depth=` | Modules collapsed by directory/layer/SCC (`rollup.rs`) |
+| `GET /api/callgraph` | Full function-level call graph (`callgraph.rs`) |
+| `GET /api/fs/list?path=` | Lists child directories, sandboxed to `fs_root` (for the root picker) |
+| `POST /api/root` 🔒 | Switch the scanned repo root at runtime, sandboxed to `fs_root` |
 
 ### UI (`ui/src/`)
 
@@ -95,22 +126,32 @@ Single-page React app with six tab views rendered in `App.tsx`:
 
 ### `affini.toml`
 
-Declares architectural intent for the repo under analysis. Three constructs:
+Declares architectural intent for the repo under analysis. Four constructs:
 
 ```toml
 [boundaries]
 core = ["core/crates/affini-core/**"]   # name → file glob(s)
 
 [rules]
-forbidden = [{ from = "core", to = "cli", reason = "..." }]
-layers    = ["core", "cli", "ui"]       # lower index = more stable
+forbidden  = [{ from = "core", to = "cli", reason = "..." }]
+layers     = ["core", "cli", "ui"]      # lower index = more stable
+canonical  = [{ concept = "**/date*.ts", path = "src/utils/date.ts" }]
+# ^ flags every other file matching `concept`'s glob as a duplicate of the
+# canonical implementation at `path`. Emits Warning-severity violations.
 ```
 
-`affini.toml` in this repo enforces affini's own architecture (core ↛ cli ↛ ui).
+`affini.toml` in this repo enforces affini's own architecture (core ↛ cli ↛ ui) —
+**but only for the languages the scanner understands.** `graph::scan` only parses
+`.ts`/`.tsx`/`.js`/`.jsx`/`.mjs`/`.cjs` files; it does not parse Rust. Since `core` and
+`cli` are entirely Rust, those boundaries currently match zero files, so `affini check`
+against this repo's own `affini.toml` only meaningfully enforces the `ui` boundary
+today. `affini check --intent affini.toml` reporting "no violations" does not mean the
+Rust-side layering is actually being verified — there's simply nothing for the scanner
+to see there yet.
 
 ### AI feature
 
-Optional. Set `ANTHROPIC_API_KEY` to enable `POST /api/flows/:id/explain`. The key is read from the environment at call time — no rebuild required. The call is made directly to the Anthropic Messages API in `affini-cli/src/ai.rs` (model: `claude-sonnet-4-6`).
+Optional. Set `ANTHROPIC_API_KEY` to enable `POST /api/flows/:id/explain`. The key is read from the environment at call time — no rebuild required. The call is made directly to the Anthropic Messages API in `affini-cli/src/ai.rs`, using a shared client with a 30s timeout. Model defaults to `claude-sonnet-4-6`, overridable via `ANTHROPIC_MODEL` without a rebuild.
 
 ## Documentation maintenance
 
